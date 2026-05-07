@@ -1,0 +1,125 @@
+name: Release Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag name (e.g., v1.0.0)'
+        required: true
+
+jobs:
+  build-linux:
+    name: Build Linux Executable
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+        
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsndfile1 libopenblas-dev gfortran
+        
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy scipy matplotlib Pillow pyyaml tabulate soundfile tqdm uvicorn fastapi python-multipart pyinstaller
+        
+    - name: Install AutoEq package
+      run: |
+        pip install -e .
+        
+    - name: Build executable
+      run: |
+        python -m PyInstaller --onefile --name autoeq_api \
+          --add-data "autoeq/*.py:autoeq" \
+          --hidden-import=autoeq \
+          --hidden-import=autoeq.api \
+          --hidden-import=autoeq.batch_processing \
+          --hidden-import=autoeq.constants \
+          --hidden-import=autoeq.csv \
+          --hidden-import=autoeq.frequency_response \
+          --hidden-import=autoeq.peq \
+          --hidden-import=autoeq.rest_api \
+          --hidden-import=autoeq.utils \
+          --hidden-import=uvicorn \
+          --hidden-import=fastapi \
+          --hidden-import=numpy \
+          --hidden-import=scipy \
+          --hidden-import=matplotlib \
+          --hidden-import=PIL \
+          --hidden-import=yaml \
+          --hidden-import=tabulate \
+          --hidden-import=soundfile \
+          --hidden-import=tqdm \
+          main.py
+        
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: autoeq-linux-x64
+        path: dist/autoeq_api
+
+  create-release:
+    name: Create Release
+    needs: build-linux
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: autoeq-linux-x64
+        path: dist/
+        
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref_name }}
+        release_name: Release ${{ github.ref_name }}
+        body: |
+          ## AutoEq API Release
+          
+          ### Download
+          - Linux x64: `autoeq_api`
+          
+          ### Features
+          - REST API for headphone equalization
+          - Parametric EQ generation
+          - Frequency response processing
+          
+          ### Usage
+          ```bash
+          chmod +x autoeq_api
+          ./autoeq_api
+          ```
+          
+          ### Access
+          - API: http://localhost:8000
+          - Docs: http://localhost:8000/docs
+        draft: false
+        prerelease: false
+        
+    - name: Upload Release Asset
+      id: upload-release-asset
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: dist/autoeq_api
+        asset_name: autoeq_api_linux_x64
+        asset_content_type: application/octet-stream

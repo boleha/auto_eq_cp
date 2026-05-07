@@ -1,0 +1,26 @@
+# AutoEq API 服务 Docker镜像
+# 构建命令: docker build -f Dockerfile.api -t autoeq-api .
+# 运行命令: docker run -p 8000:8000 autoeq-api
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    libsndfile1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制项目文件
+COPY ./autoeq ./autoeq/
+COPY ./pyproject.toml .
+COPY ./README.md .
+COPY ./main.py .
+
+# 安装Python依赖
+RUN pip install --no-cache-dir -e .
+RUN pip install --no-cache-dir uvicorn fastapi python-multipart
+
+EXPOSE 8000
+
+CMD ["uvicorn", "autoeq.rest_api:app", "--host", "0.0.0.0", "--port", "8000"]

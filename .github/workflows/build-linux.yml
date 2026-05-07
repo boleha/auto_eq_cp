@@ -1,0 +1,79 @@
+name: Build Linux Executable
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsndfile1 libopenblas-dev gfortran
+
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install numpy scipy matplotlib Pillow pyyaml tabulate soundfile tqdm uvicorn fastapi python-multipart pyinstaller
+
+    - name: Install AutoEq package
+      run: |
+        pip install -e .
+
+    - name: Build executable with PyInstaller
+      run: |
+        python -m PyInstaller --onefile --name autoeq_api \
+          --add-data "autoeq/*.py:autoeq" \
+          --hidden-import=autoeq \
+          --hidden-import=autoeq.api \
+          --hidden-import=autoeq.batch_processing \
+          --hidden-import=autoeq.constants \
+          --hidden-import=autoeq.csv \
+          --hidden-import=autoeq.frequency_response \
+          --hidden-import=autoeq.peq \
+          --hidden-import=autoeq.rest_api \
+          --hidden-import=autoeq.utils \
+          --hidden-import=uvicorn \
+          --hidden-import=fastapi \
+          --hidden-import=numpy \
+          --hidden-import=scipy \
+          --hidden-import=matplotlib \
+          --hidden-import=PIL \
+          --hidden-import=yaml \
+          --hidden-import=tabulate \
+          --hidden-import=soundfile \
+          --hidden-import=tqdm \
+          main.py
+
+    - name: Verify build
+      run: |
+        ls -la dist/
+        file dist/autoeq_api
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: autoeq-linux-x64
+        path: dist/autoeq_api
+        retention-days: 30
+        if-no-files-found: error
+
+    - name: Test executable
+      run: |
+        timeout --signal=SIGINT 5 ./dist/autoeq_api || echo "Test completed"

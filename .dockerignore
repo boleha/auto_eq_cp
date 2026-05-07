@@ -1,0 +1,17 @@
+.git
+.github
+__pycache__
+*.pyc
+*.pyo
+dist
+build
+*.spec
+target
+measurements
+results
+tests
+*.egg-info
+.dockerignore
+Dockerfile
+Dockerfile.build
+deploy

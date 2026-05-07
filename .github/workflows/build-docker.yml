@@ -1,0 +1,47 @@
+name: Build Docker Image
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v5
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Build Docker image
+      run: |
+        docker build -t autoeq-api .
+        echo "Build completed successfully"
+        docker images autoeq-api
+
+    - name: Test Docker image
+      run: |
+        docker run -d --name autoeq-test -p 8000:8000 autoeq-api
+        sleep 10
+        curl -f http://localhost:8000/ || (echo "API test failed" && docker logs autoeq-test && exit 1)
+        echo "API test passed"
+        docker stop autoeq-test
+        docker rm autoeq-test
+
+    - name: Save Docker image as tar
+      run: |
+        docker save autoeq-api -o autoeq-api.tar
+        ls -lh autoeq-api.tar
+
+    - name: Upload Docker image
+      uses: actions/upload-artifact@v4
+      with:
+        name: autoeq-docker-image
+        path: autoeq-api.tar
+        retention-days: 30
+        if-no-files-found: error
