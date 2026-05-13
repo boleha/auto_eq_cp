@@ -22,5 +22,4 @@ COPY . .
 
 RUN cargo build --release --lib
 
-FROM scratch
-COPY --from=0 /build/target/release/libautoeq.so /libautoeq.so
+RUN cp target/release/libautoeq.so /libautoeq.so

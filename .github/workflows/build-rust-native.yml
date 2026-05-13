@@ -64,9 +64,7 @@ jobs:
     - name: Build Linux .so in Docker (glibc 2.28)
       run: |
         docker build -f autoeq-rust/Dockerfile.linux -t autoeq-build autoeq-rust/
-        docker create --name autoeq-container autoeq-build
-        docker cp autoeq-container:/build/target/release/libautoeq.so autoeq-rust/libautoeq.so
-        docker rm -f autoeq-container
+        docker run --rm -v $(pwd)/autoeq-rust:/output autoeq-build sh -c "cp /libautoeq.so /output/libautoeq.so"
 
     - name: Upload .so artifact
       uses: actions/upload-artifact@v4
