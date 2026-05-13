@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoEq Python vs Rust 对比</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0e14;
+    --surface: #141b22;
+    --border: #1e2a36;
+    --text: #b0b8c4;
+    --accent-python: #ffd43b;
+    --accent-rust: #f74c00;
+    --accent-target: #2ea043;
+    --accent-raw: #79c0ff;
+    --red: #f85149;
+    --green: #3fb950;
+    --glow-python: rgba(255, 212, 59, 0.15);
+    --glow-rust: rgba(247, 76, 0, 0.12);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: radial-gradient(ellipse at 50% 0%, rgba(121,192,255,0.04) 0%, transparent 60%),
+                radial-gradient(ellipse at 80% 100%, rgba(247,76,0,0.03) 0%, transparent 50%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .app { max-width: 1400px; margin: 0 auto; padding: 24px 32px; position: relative; z-index: 1; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 0 32px; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap; gap: 16px;
+  }
+  h1 {
+    font-size: 22px; font-weight: 600; letter-spacing: -0.3px;
+    background: linear-gradient(135deg, var(--accent-python), var(--accent-rust));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .badges { display: flex; gap: 10px; }
+  .badge {
+    padding: 5px 12px; border-radius: 4px; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.8px;
+  }
+  .badge-python { background: rgba(255,212,59,0.12); color: var(--accent-python); border: 1px solid rgba(255,212,59,0.25); }
+  .badge-rust   { background: rgba(247,76,0,0.12);  color: var(--accent-rust);   border: 1px solid rgba(247,76,0,0.25); }
+  .badge-diff   { background: rgba(248,81,73,0.10);  color: var(--red);           border: 1px solid rgba(248,81,73,0.20); font-size: 10px; }
+
+  .file-bar {
+    display: flex; gap: 12px; padding: 16px 0; align-items: center; flex-wrap: wrap;
+  }
+  .file-input-wrap {
+    position: relative; flex: 1; min-width: 200px;
+  }
+  .file-input-wrap input[type=file] {
+    width: 100%; padding: 10px 14px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-family: inherit; font-size: 12px;
+    cursor: pointer; transition: border-color 0.2s;
+  }
+  .file-input-wrap input[type=file]:hover { border-color: #3a4a5a; }
+  .file-label {
+    font-size: 10px; text-transform: uppercase; letter-spacing: 1.2px;
+    color: #5a6a7a; margin-bottom: 4px; display: block;
+  }
+  .btn {
+    padding: 10px 20px; border-radius: 6px; border: none; font-family: inherit;
+    font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s;
+    letter-spacing: 0.5px;
+  }
+  .btn-analyze {
+    background: linear-gradient(135deg, #1a3a2a, #0d2818);
+    color: var(--green); border: 1px solid rgba(63,185,80,0.3);
+  }
+  .btn-analyze:hover { background: linear-gradient(135deg, #224430, #153020); box-shadow: 0 0 16px rgba(63,185,80,0.08); }
+
+  .chart-container {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 20px; margin: 16px 0; position: relative;
+  }
+  .legend-inline {
+    display: flex; gap: 20px; margin-bottom: 12px; flex-wrap: wrap;
+  }
+  .legend-item {
+    display: flex; align-items: center; gap: 6px; font-size: 11px; cursor: pointer;
+    opacity: 0.7; transition: opacity 0.2s;
+  }
+  .legend-item.active { opacity: 1; }
+  .legend-dot {
+    width: 10px; height: 10px; border-radius: 2px;
+  }
+  .dot-raw { background: var(--accent-raw); }
+  .dot-target { background: var(--accent-target); }
+  .dot-python { background: var(--accent-python); }
+  .dot-rust { background: var(--accent-rust); }
+
+  .filters-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 16px 0;
+  }
+  @media (max-width: 900px) { .filters-grid { grid-template-columns: 1fr; } }
+
+  .filter-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; position: relative; overflow: hidden;
+  }
+  .filter-card::before {
+    content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 2px;
+  }
+  .card-python::before { background: linear-gradient(90deg, var(--accent-python), transparent); }
+  .card-rust::before { background: linear-gradient(90deg, var(--accent-rust), transparent); }
+  .card-title {
+    font-size: 13px; font-weight: 600; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card-title .preamp { font-size: 11px; opacity: 0.6; }
+  .filter-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  .filter-table th {
+    text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border);
+    color: #5a6a7a; font-weight: 500; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+  }
+  .filter-table td { padding: 4px 6px; border-bottom: 1px solid rgba(30,42,54,0.5); }
+  .filter-table tr:last-child td { border-bottom: none; }
+  .filter-table .fc { color: var(--text); }
+  .filter-table .gain-pos { color: #e3b341; }
+  .filter-table .gain-neg { color: #f85149; }
+  .filter-table .q-val { color: #6e7681; }
+
+  .diff-bar {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 20px; margin: 16px 0;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  }
+  .diff-indicator {
+    font-size: 12px; font-weight: 600;
+  }
+  .diff-value {
+    padding: 4px 10px; border-radius: 4px; font-size: 20px; font-weight: 700; font-family: inherit;
+  }
+
+  .stats-grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin: 16px 0;
+  }
+  @media (max-width: 700px) { .stats-grid { grid-template-columns: repeat(2, 1fr); } }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px 16px; text-align: center;
+  }
+  .stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: #5a6a7a; margin-bottom: 4px; }
+  .stat-value { font-size: 18px; font-weight: 700; }
+  .stat-python { color: var(--accent-python); }
+  .stat-rust { color: var(--accent-rust); }
+
+  .footer-note {
+    text-align: center; padding: 24px 0; font-size: 10px; color: #3a4a5a;
+    border-top: 1px solid var(--border); margin-top: 24px;
+  }
+
+  canvas { max-height: 520px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>AutoEq · Python vs Rust 频响曲线对比</h1>
+    <div class="badges">
+      <span class="badge badge-python">Python</span>
+      <span class="badge badge-rust">Rust</span>
+      <span class="badge badge-diff" id="diffBdg">---</span>
+    </div>
+  </header>
+
+  <div class="file-bar">
+    <div class="file-input-wrap">
+      <span class="file-label">测量 TXT (harman2016.txt)</span>
+      <input type="file" id="measureFile" accept=".txt,.csv">
+    </div>
+    <div class="file-input-wrap">
+      <span class="file-label">目标 TXT (5128DF1.5.txt)</span>
+      <input type="file" id="targetFile" accept=".txt,.csv">
+    </div>
+    <div class="file-input-wrap">
+      <span class="file-label">🐍 Python 结果 JSON</span>
+      <input type="file" id="pythonJsonFile" accept=".json">
+    </div>
+    <div class="file-input-wrap">
+      <span class="file-label">🦀 Rust 结果 JSON</span>
+      <input type="file" id="rustJsonFile" accept=".json">
+    </div>
+    <button class="btn btn-analyze" onclick="analyze()">▶ 开始分析</button>
+  </div>
+
+  <div class="chart-container" id="chartWrap" style="display:none">
+    <div class="legend-inline">
+      <div class="legend-item active" onclick="toggleDataset(0)" id="leg0">
+        <span class="legend-dot dot-raw"></span>原始测量
+      </div>
+      <div class="legend-item active" onclick="toggleDataset(1)" id="leg1">
+        <span class="legend-dot dot-target"></span>目标曲线
+      </div>
+      <div class="legend-item active" onclick="toggleDataset(2)" id="leg2">
+        <span class="legend-dot dot-python"></span>Python EQ 后
+      </div>
+      <div class="legend-item active" onclick="toggleDataset(3)" id="leg3">
+        <span class="legend-dot dot-rust"></span>Rust EQ 后
+      </div>
+    </div>
+    <canvas id="mainChart"></canvas>
+  </div>
+
+  <div id="statsArea" style="display:none">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-label">Python preamp</div>
+        <div class="stat-value stat-python" id="statPreampPy">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Rust preamp</div>
+        <div class="stat-value stat-rust" id="statPreampRu">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Python 均方误差</div>
+        <div class="stat-value stat-python" id="statMsePy">--</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-label">Rust 均方误差</div>
+        <div class="stat-value stat-rust" id="statMseRu">--</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="filters-grid" id="filtersArea" style="display:none">
+    <div class="filter-card card-python">
+      <div class="card-title">
+        🐍 Python EQ 滤波器 <span class="preamp" id="preampPy"></span>
+      </div>
+      <table class="filter-table" id="pythonFilters"></table>
+    </div>
+    <div class="filter-card card-rust">
+      <div class="card-title">
+        🦀 Rust EQ 滤波器 <span class="preamp" id="preampRu"></span>
+      </div>
+      <table class="filter-table" id="rustFilters"></table>
+    </div>
+  </div>
+
+  <div class="footer-note">
+    Biquad 频率响应仿真 · 采样率 44100 Hz · 拖动文件或点击「开始分析」
+  </div>
+</div>
+
+<script>
+// ====== Embedded defaults (fallback) ======
+const EMBEDDED_TARGET_JSON = { "preamp": -2.9169584134460718, "filters": [{ "q": 0.7, "type": "LowShelf", "fc": 105.0, "gain": 0.6644530792030894 }, { "q": 0.7, "type": "HighShelf", "fc": 10000.0, "gain": -5.0750985388774525 }, { "q": 0.6243183946710376, "type": "Peaking", "fc": 192.3560157004559, "gain": -5.399972653426162 }, { "q": 2.4330989512985597, "type": "Peaking", "fc": 5624.58099999078, "gain": 2.628324683624292 }, { "q": 1.5993038433076927, "type": "Peaking", "fc": 753.5278594169492, "gain": 1.4741865505227383 }, { "q": 1.763201358452425, "type": "Peaking", "fc": 1474.9262179815141, "gain": -1.3867919795810222 }, { "q": 1.702349777307508, "type": "Peaking", "fc": 3749.5646889266864, "gain": 0.7271106723691432 }, { "q": 5.8151070821735935, "type": "Peaking", "fc": 22.01974876772931, "gain": 1.6138468443751646 }, { "q": 0.5192259217837972, "type": "Peaking", "fc": 40.05740305924286, "gain": 1.14997840865605 }, { "q": 1.1865404340699013, "type": "Peaking", "fc": 88.45166818705209, "gain": 0.6199244118078272 }] };
+const EMBEDDED_RUST_JSON = { "preamp": -5.1988666521605404, "filters": [{ "q": 0.7, "type": "LowShelf", "fc": 105.0, "gain": -0.16832666053427478 }, { "q": 0.7, "type": "HighShelf", "fc": 9367.829836830975, "gain": -2.3204255120535358 }, { "q": 0.741031484037695, "type": "Peaking", "fc": 201.18181098681399, "gain": -4.99886665216054 }, { "q": 2.1658090115479665, "type": "Peaking", "fc": 5868.598868466366, "gain": 2.404760198498296 }, { "q": 1.838894612209647, "type": "Peaking", "fc": 1501.4339000279367, "gain": -1.0945190316383853 }, { "q": 1.5694016157479902, "type": "Peaking", "fc": 810.1791134460445, "gain": 1.1532814020947473 }, { "q": 1.7397311709220873, "type": "Peaking", "fc": 4761.958169583483, "gain": 0.803760494813212 }, { "q": 6.0, "type": "Peaking", "fc": 22.092442508224092, "gain": 2.553205610130119 }, { "q": 0.6364409914221362, "type": "Peaking", "fc": 30.67955587159357, "gain": 1.663350546630167 }, { "q": 1.2566716094836228, "type": "Peaking", "fc": 81.34740417801855, "gain": 0.6762500990134408 }] };
+const EMBEDDED_MEASURE = `* Freq(Hz) SPL(dB)
+20.000000 6.890
+20.144928 6.897
+20000.000000 -17.123`;
+
+let pythonEq = null;
+let rustEq = null;
+let autoLoaded = false;
+
+function loadDefault(pyEq, ruEq) {
+  pythonEq = pyEq; rustEq = ruEq;
+  document.getElementById('pythonJsonFile').dataset.loaded = 'true';
+  document.getElementById('rustJsonFile').dataset.loaded = 'true';
+  autoLoaded = true;
+  tryAnalyze();
+}
+
+function tryAnalyze() {
+  if (!pythonEq || !rustEq) return;
+  if (!autoLoaded) return;
+  // 尝试 fetch 本地 TXT 文件
+  Promise.all([
+    fetch('../test_file/harman2016.txt').then(r => r.ok ? r.text() : Promise.reject()).catch(() => null),
+    fetch('../test_file/5128DF1.5.txt').then(r => r.ok ? r.text() : Promise.reject()).catch(() => null)
+  ]).then(([mTxt, tTxt]) => {
+    if (mTxt && tTxt) {
+      runAnalysis(mTxt, tTxt);
+    } else {
+      document.getElementById('chartWrap').style.display = 'block';
+      document.getElementById('statsArea').style.display = 'block';
+      document.getElementById('filtersArea').style.display = 'grid';
+      document.getElementById('statPreampPy').textContent = pythonEq.preamp.toFixed(2) + ' dB';
+      document.getElementById('statPreampRu').textContent = rustEq.preamp.toFixed(2) + ' dB';
+      document.getElementById('preampPy').textContent = 'preamp: ' + pythonEq.preamp.toFixed(2) + ' dB';
+      document.getElementById('preampRu').textContent = 'preamp: ' + rustEq.preamp.toFixed(2) + ' dB';
+      renderFilterTable('pythonFilters', pythonEq.filters);
+      renderFilterTable('rustFilters', rustEq.filters);
+      document.getElementById('diffBdg').textContent = '需加载TXT';
+    }
+  });
+}
+
+// 页面加载时自动 fetch JSON
+window.addEventListener('DOMContentLoaded', () => {
+  Promise.all([
+    fetch('./python_result.json').then(r => r.json()).catch(() => null),
+    fetch('./rust_result.json').then(r => r.json()).catch(() => null)
+  ]).then(([py, ru]) => {
+    if (py && ru) {
+      const pyEq = py.data || py;
+      const ruEq = ru.data || ru;
+      loadDefault(pyEq, ruEq);
+    } else {
+      loadDefault(EMBEDDED_TARGET_JSON, EMBEDDED_RUST_JSON);
+    }
+  });
+});
+
+function runAnalysis(mText, tText) {
+  const mData = parseRigolTxt(mText);
+  const tData = parseRigolTxt(tText);
+  rawFreq = mData.map(d => d[0]);
+  rawSpl = mData.map(d => d[1]);
+  targetFreq = tData.map(d => d[0]);
+  targetSpl = tData.map(d => d[1]);
+
+  const targetInterp = interpolateTarget(targetFreq, targetSpl, rawFreq);
+  const pyEqCurve = applyEqFilters(rawFreq, pythonEq.filters, FS);
+  const ruEqCurve = applyEqFilters(rawFreq, rustEq.filters, FS);
+  const pyEqualized = rawSpl.map((v, i) => v + pythonEq.preamp + pyEqCurve[i]);
+  const ruEqualized = rawSpl.map((v, i) => v + rustEq.preamp + ruEqCurve[i]);
+  const msePy = mse(pyEqualized, targetInterp);
+  const mseRu = mse(ruEqualized, targetInterp);
+
+  document.getElementById('chartWrap').style.display = 'block';
+  document.getElementById('statsArea').style.display = 'block';
+  document.getElementById('filtersArea').style.display = 'grid';
+  document.getElementById('statPreampPy').textContent = pythonEq.preamp.toFixed(2) + ' dB';
+  document.getElementById('statPreampRu').textContent = rustEq.preamp.toFixed(2) + ' dB';
+  document.getElementById('statMsePy').textContent = msePy.toFixed(2) + ' dB';
+  document.getElementById('statMseRu').textContent = mseRu.toFixed(2) + ' dB';
+  document.getElementById('preampPy').textContent = 'preamp: ' + pythonEq.preamp.toFixed(2) + ' dB';
+  document.getElementById('preampRu').textContent = 'preamp: ' + rustEq.preamp.toFixed(2) + ' dB';
+
+  const diffPct = Math.abs(msePy - mseRu) / Math.max(msePy, mseRu) * 100;
+  document.getElementById('diffBdg').textContent = diffPct.toFixed(1) + '% 差异';
+
+  renderFilterTable('pythonFilters', pythonEq.filters);
+  renderFilterTable('rustFilters', rustEq.filters);
+  drawChart(pyEqualized, ruEqualized, targetInterp);
+}
+
+// ====== Biquad Math ======
+const FS = 44100;
+const PI = Math.PI;
+
+function biquadCoeffsPeaking(fc, q, gain, fs) {
+  const a = 10 ** (gain / 40);
+  const w0 = 2 * PI * fc / fs;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosW0 = Math.cos(w0);
+
+  const a0_inv = 1 / (1 + alpha / a);
+  const b0 = (1 + alpha * a) * a0_inv;
+  const b1 = -2 * cosW0 * a0_inv;
+  const b2 = (1 - alpha * a) * a0_inv;
+  const a1 = -b1;
+  const a2 = -(1 - alpha / a) * a0_inv;
+
+  return [1, a1, a2, b0, b1, b2];
+}
+
+function biquadCoeffsLowShelf(fc, q, gain, fs) {
+  const a = 10 ** (gain / 40);
+  const w0 = 2 * PI * fc / fs;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosW0 = Math.cos(w0);
+  const sqrtA = Math.sqrt(a);
+
+  const a0 = (a + 1) + (a - 1) * cosW0 + 2 * sqrtA * alpha;
+  const a1 = -(-2 * ((a - 1) + (a + 1) * cosW0)) / a0;
+  const a2 = -((a + 1) + (a - 1) * cosW0 - 2 * sqrtA * alpha) / a0;
+  const b0 = (a * ((a + 1) - (a - 1) * cosW0 + 2 * sqrtA * alpha)) / a0;
+  const b1 = (2 * a * ((a - 1) - (a + 1) * cosW0)) / a0;
+  const b2 = (a * ((a + 1) - (a - 1) * cosW0 - 2 * sqrtA * alpha)) / a0;
+
+  return [1, a1, a2, b0, b1, b2];
+}
+
+function biquadCoeffsHighShelf(fc, q, gain, fs) {
+  const a = 10 ** (gain / 40);
+  const w0 = 2 * PI * fc / fs;
+  const alpha = Math.sin(w0) / (2 * q);
+  const cosW0 = Math.cos(w0);
+  const sqrtA = Math.sqrt(a);
+
+  const a0 = (a + 1) - (a - 1) * cosW0 + 2 * sqrtA * alpha;
+  const a1 = -(2 * ((a - 1) - (a + 1) * cosW0)) / a0;
+  const a2 = -((a + 1) - (a - 1) * cosW0 - 2 * sqrtA * alpha) / a0;
+  const b0 = (a * ((a + 1) + (a - 1) * cosW0 + 2 * sqrtA * alpha)) / a0;
+  const b1 = (-2 * a * ((a - 1) + (a + 1) * cosW0)) / a0;
+  const b2 = (a * ((a + 1) + (a - 1) * cosW0 - 2 * sqrtA * alpha)) / a0;
+
+  return [1, a1, a2, b0, b1, b2];
+}
+
+function biquadResponse(freq, coeffs, fs) {
+  const [_, a1, a2, b0, b1, b2] = coeffs;
+  const responses = [];
+  for (const f of freq) {
+    const w = 2 * PI * f / fs;
+    const phi = 4 * Math.sin(w / 2) ** 2;
+    const num = (b0 + b1 + b2) ** 2 + (b0 * b2 * phi - (b1 * (b0 + b2) + 4 * b0 * b2)) * phi;
+    const den = (1 + a1 + a2) ** 2 + (a2 * phi - (a1 * (1 + a2) + 4 * a2)) * phi;
+    responses.push(10 * Math.log10(Math.max(num, 1e-30)) - 10 * Math.log10(Math.max(den, 1e-30)));
+  }
+  return responses;
+}
+
+function applyEqFilters(freq, filters, fs) {
+  const cascade = new Array(freq.length).fill(0);
+  for (const f of filters) {
+    let coeffs;
+    switch (f.type) {
+      case 'Peaking':   coeffs = biquadCoeffsPeaking(f.fc, f.q, f.gain, fs); break;
+      case 'LowShelf':  coeffs = biquadCoeffsLowShelf(f.fc, f.q, f.gain, fs); break;
+      case 'HighShelf': coeffs = biquadCoeffsHighShelf(f.fc, f.q, f.gain, fs); break;
+      default: continue;
+    }
+    const resp = biquadResponse(freq, coeffs, fs);
+    for (let i = 0; i < freq.length; i++) cascade[i] += resp[i];
+  }
+  return cascade;
+}
+
+// ====== File Parsing ======
+function parseRigolTxt(text) {
+  const lines = text.split('\n');
+  const data = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('*') || trimmed.startsWith('#')) continue;
+    const parts = trimmed.split(/\s+/);
+    if (parts.length >= 2) {
+      const f = parseFloat(parts[0]);
+      const v = parseFloat(parts[1]);
+      if (!isNaN(f) && !isNaN(v)) data.push([f, v]);
+    }
+  }
+  return data;
+}
+
+// ====== Viz ======
+let chart = null;
+let rawFreq = null, rawSpl = null;
+let targetFreq = null, targetSpl = null;
+
+function interpolateTarget(tsrcF, tsrcS, mF) {
+  // Simple log-linear interpolation
+  const logF = mF.map(f => Math.log10(Math.max(f, 0.001)));
+  const logSrc = tsrcF.map(f => Math.log10(Math.max(f, 0.001)));
+  const result = [];
+  for (const lf of logF) {
+    let lo = 0, hi = logSrc.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (logSrc[mid] <= lf) lo = mid; else hi = mid;
+    }
+    const t = (lf - logSrc[lo]) / (logSrc[hi] - logSrc[lo]);
+    const v = tsrcS[lo] + t * (tsrcS[hi] - tsrcS[lo]);
+    result.push(isNaN(v) ? tsrcS[lo] : v);
+  }
+  return result;
+}
+
+function mse(a, b) {
+  let sum = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) sum += (a[i] - b[i]) ** 2;
+  return Math.sqrt(sum / n);
+}
+
+function analyze() {
+  const mFile = document.getElementById('measureFile').files[0];
+  const tFile = document.getElementById('targetFile').files[0];
+  const pyJsonFile = document.getElementById('pythonJsonFile').files[0];
+  const ruJsonFile = document.getElementById('rustJsonFile').files[0];
+
+  if (!mFile || !tFile) {
+    alert('请选择测量 TXT 和目标 TXT 文件');
+    return;
+  }
+  if (!pyJsonFile && !pythonEq) {
+    alert('请选择 Python 结果 JSON，或等自动加载完成');
+    return;
+  }
+
+  const pyPromise = pyJsonFile ? pyJsonFile.text().then(t => {
+    const p = JSON.parse(t); return p.data || p;
+  }) : Promise.resolve(pythonEq);
+
+  const ruPromise = ruJsonFile ? ruJsonFile.text().then(t => {
+    const p = JSON.parse(t); return p.data || p;
+  }) : Promise.resolve(rustEq);
+
+  Promise.all([mFile.text(), tFile.text(), pyPromise, ruPromise])
+    .then(([mText, tText, pyEq, ruEq]) => {
+      pythonEq = pyEq; rustEq = ruEq;
+      runAnalysis(mText, tText);
+    }).catch(err => {
+      alert('文件解析失败: ' + err.message);
+    });
+}
+
+function renderFilterTable(id, filters) {
+  const tb = document.getElementById(id);
+  let html = '<thead><tr><th>#</th><th>类型</th><th>fc (Hz)</th><th>gain (dB)</th><th>Q</th></tr></thead><tbody>';
+  filters.forEach((f, i) => {
+    const gCls = f.gain >= 0 ? 'gain-pos' : 'gain-neg';
+    html += `<tr>
+      <td style="color:#3a4a5a">${i+1}</td>
+      <td>${f.type}</td>
+      <td class="fc">${f.fc.toFixed(1)}</td>
+      <td class="${gCls}">${f.gain >= 0 ? '+' : ''}${f.gain.toFixed(2)}</td>
+      <td class="q-val">${f.q.toFixed(4)}</td>
+    </tr>`;
+  });
+  html += '</tbody>';
+  tb.innerHTML = html;
+}
+
+function drawChart(pyEq, ruEq, target) {
+  const ctx = document.getElementById('mainChart').getContext('2d');
+  if (chart) chart.destroy();
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: rawFreq,
+      datasets: [
+        {
+          label: '原始测量',
+          data: rawSpl,
+          borderColor: '#79c0ff',
+          borderWidth: 1.2,
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          tension: 0.1
+        },
+        {
+          label: '目标曲线',
+          data: target,
+          borderColor: '#2ea043',
+          borderWidth: 1.5,
+          borderDash: [6, 3],
+          backgroundColor: 'transparent',
+          pointRadius: 0,
+          tension: 0.1
+        },
+        {
+          label: 'Python EQ 后',
+          data: pyEq,
+          borderColor: '#ffd43b',
+          borderWidth: 2,
+          backgroundColor: 'rgba(255,212,59,0.05)',
+          pointRadius: 0,
+          tension: 0.3,
+          fill: false
+        },
+        {
+          label: 'Rust EQ 后',
+          data: ruEq,
+          borderColor: '#f74c00',
+          borderWidth: 2,
+          backgroundColor: 'rgba(247,76,0,0.05)',
+          pointRadius: 0,
+          tension: 0.3,
+          fill: false
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: true,
+      interaction: { mode: 'nearest', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: 'rgba(20,27,34,0.95)',
+          titleColor: '#b0b8c4',
+          bodyColor: '#b0b8c4',
+          borderColor: '#1e2a36',
+          borderWidth: 1,
+          callbacks: {
+            label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} dB @ ${ctx.parsed.x.toFixed(1)} Hz`
+          }
+        }
+      },
+      scales: {
+        x: {
+          type: 'logarithmic',
+          title: { display: true, text: '频率 (Hz)', color: '#5a6a7a' },
+          grid: { color: 'rgba(30,42,54,0.5)' },
+          ticks: { color: '#5a6a7a', font: { size: 10 }, callback: v => v >= 1000 ? (v/1000).toFixed(0)+'k' : v.toFixed(0) },
+          min: 20,
+          max: 20000
+        },
+        y: {
+          title: { display: true, text: 'SPL (dB)', color: '#5a6a7a' },
+          grid: { color: 'rgba(30,42,54,0.5)' },
+          ticks: { color: '#5a6a7a', font: { size: 10 }, callback: v => v.toFixed(1) + ' dB' }
+        }
+      }
+    }
+  });
+}
+
+function toggleDataset(idx) {
+  if (!chart) return;
+  const meta = chart.getDatasetMeta(idx);
+  meta.hidden = !meta.hidden;
+  document.getElementById('leg' + idx).classList.toggle('active');
+  chart.update();
+}
+</script>
+</body>
+</html>

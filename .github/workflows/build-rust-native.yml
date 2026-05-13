@@ -1,0 +1,140 @@
+name: Build Rust Native Library
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'autoeq-rust/**'
+  pull_request:
+    branches: [ main, master ]
+    paths:
+      - 'autoeq-rust/**'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Build Windows DLL
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          autoeq-rust/target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('autoeq-rust/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Build release DLL
+      working-directory: autoeq-rust
+      run: cargo build --release --lib
+
+    - name: Rename artifact
+      working-directory: autoeq-rust
+      run: |
+        Copy-Item target/release/autoeq.dll autoeq.dll
+        Copy-Item target/release/autoeq.lib autoeq.lib
+
+    - name: Upload DLL artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: autoeq-windows-x64
+        path: |
+          autoeq-rust/autoeq.dll
+          autoeq-rust/autoeq.lib
+        retention-days: 30
+
+  build-linux:
+    name: Build Linux .so
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          autoeq-rust/target
+        key: ${{ runner.os }}-cargo-${{ hashFiles('autoeq-rust/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+
+    - name: Build release .so
+      working-directory: autoeq-rust
+      run: cargo build --release --lib
+
+    - name: Rename artifact
+      working-directory: autoeq-rust
+      run: |
+        cp target/release/libautoeq.so libautoeq.so
+
+    - name: Upload .so artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: autoeq-linux-x64
+        path: autoeq-rust/libautoeq.so
+        retention-days: 30
+
+  release:
+    name: Create Release
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: autoeq-windows-x64
+        path: dist/windows/
+
+    - name: Download Linux artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: autoeq-linux-x64
+        path: dist/linux/
+
+    - name: List artifacts
+      run: ls -laR dist/
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: Release ${{ github.ref_name }}
+        body: |
+          ## AutoEq Rust Native Library
+
+          ### Downloads
+          - **Windows x64**: `autoeq.dll` + `autoeq.lib`
+          - **Linux x64**: `libautoeq.so`
+
+          ### FFI API
+          - `autoeq_eq_by_range(input: *const c_char) -> *mut c_char`
+          - `autoeq_equalize_json(input: *const c_char) -> *mut c_char`
+          - `autoeq_version() -> *mut c_char`
+          - `autoeq_configs() -> *mut c_char`
+          - `autoeq_warmup()`
+          - `autoeq_free_string(ptr: *mut c_char)`
+        files: |
+          dist/windows/autoeq.dll
+          dist/windows/autoeq.lib
+          dist/linux/libautoeq.so
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

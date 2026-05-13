@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rustc --version)",
+      "Bash(cargo --version)",
+      "Bash(cargo test *)",
+      "Bash(cargo build *)",
+      "Bash(cargo run *)",
+      "Bash(cargo fix *)",
+      "Bash(mkdir -p \"D:\\\\workspace\\\\project\\\\project_java\\\\apitanchjim\\\\src\\\\main\\\\resources\\\\native\")",
+      "Bash(cp \"D:\\\\workspace\\\\project\\\\project_python\\\\auto\\\\auto_eq_cp\\\\autoeq-rust\\\\target\\\\release\\\\autoeq.dll\" \"D:\\\\workspace\\\\project\\\\project_java\\\\apitanchjim\\\\src\\\\main\\\\resources\\\\native\\\\autoeq.dll\")",
+      "Bash(mkdir -p \"D:/workspace/project/project_java/apitanchjim/src/main/resources/native\")",
+      "Bash(cp \"D:/workspace/project/project_python/auto/auto_eq_cp/autoeq-rust/target/release/autoeq.dll\" \"D:/workspace/project/project_java/apitanchjim/src/main/resources/native/autoeq.dll\")"
+    ]
+  }
+}
