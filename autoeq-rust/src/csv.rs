@@ -37,10 +37,6 @@ static RAW_HEADER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:spl|gain|ampl|raw)").unwrap()
 });
 
-static NUMERIC_START: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^\d").unwrap()
-});
-
 /// Parse CSV text and extract frequency + raw (SPL) data.
 /// Supports AutoEq, REW, Crinacle, and generic CSV formats.
 pub fn parse_csv(csv: &str) -> Result<ParsedCsv> {

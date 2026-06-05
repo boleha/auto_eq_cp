@@ -153,7 +153,7 @@ pub unsafe extern "C" fn autoeq_eq_by_range(input: *const c_char) -> *mut c_char
 
     let params = ProcessParams { fs, preamp, ..ProcessParams::default() };
 
-    let eq_result = match api::equalize_data(
+    let _eq_result = match api::equalize_data(
         &req.select.frequency,
         &req.select.raw,
         Some(&target_raw_aligned),

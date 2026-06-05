@@ -6,6 +6,10 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "autoeq-cli"
+path = "src/main.rs"
+
 [dependencies]
 realfft = "3.4"
 argmin = "0.10"
