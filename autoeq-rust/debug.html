@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>WASM Debug</title>
+<style>
+  body { font-family: monospace; max-width: 960px; margin: 20px auto; padding: 20px; background: #111; color: #eee; }
+  pre { background: #1a1a1a; padding: 12px; border-radius: 4px; white-space: pre-wrap; font-size: 13px; }
+  .ok { color: #0f0; } .err { color: #f44; } .log { color: #ff0; }
+</style>
+</head>
+<body>
+<h1>WASM Debug Console</h1>
+<pre id="log"></pre>
+
+<script type="module">
+import init, { init_panic_hook, version_js, get_configs_js, optimize_parametric_eq_js, equalize_data_js } from './pkg/autoeq.js';
+
+const out = document.getElementById('log');
+function log(msg, cls = '') {
+  out.innerHTML += `<span class="${cls}">${msg}</span>\n`;
+}
+
+async function main() {
+  // Step 1: Init WASM
+  log('Step 1: Loading WASM...', 'log');
+  try {
+    const wasmUrl = new URL('./pkg/autoeq_bg.wasm', import.meta.url);
+    log(`  WASM URL: ${wasmUrl.href}`);
+    await init({ module_or_path: wasmUrl });
+    init_panic_hook();
+    log(`  Version: ${version_js()}`, 'ok');
+    log(`  Configs: ${get_configs_js()}`, 'ok');
+    log('  WASM init OK', 'ok');
+  } catch (e) {
+    log(`  FAIL: ${e.message}`, 'err');
+    log(`  Stack: ${e.stack}`, 'err');
+    return;
+  }
+
+  // Step 2: Test with small hardcoded data
+  log('\nStep 2: Test with small data...', 'log');
+  const freq = [];
+  const raw = [];
+  for (let i = 0; i < 100; i++) {
+    freq.push(20 + i * 200);
+    raw.push(Math.sin(i * 0.1) * 5);
+  }
+
+  const input = {
+    frequency: freq,
+    raw: raw,
+    config: '6_PEAKING',
+    name: 'test',
+    fs: 44100,
+    max_gain: 6,
+  };
+
+  const jsonStr = JSON.stringify(input);
+  log(`  Input JSON size: ${jsonStr.length} chars`);
+
+  try {
+    const t0 = performance.now();
+    const resultJson = optimize_parametric_eq_js(jsonStr);
+    const t1 = performance.now();
+    log(`  PEQ time: ${(t1 - t0).toFixed(1)} ms`, 'ok');
+
+    const result = JSON.parse(resultJson);
+    if (result.error) {
+      log(`  PEQ error: ${result.error}`, 'err');
+    } else {
+      log(`  PEQ result: preamp=${result.preamp.toFixed(1)}, filters=${result.filters.length}`, 'ok');
+      log(`  ${JSON.stringify(result, null, 2).substring(0, 500)}`);
+    }
+  } catch (e) {
+    log(`  PEQ crash: ${e.message}`, 'err');
+    log(`  Stack: ${e.stack}`, 'err');
+  }
+
+  // Step 3: Test with a file
+  log('\nStep 3: Load and process file...', 'log');
+  try {
+    const resp = await fetch('../test_file/5128DF1.5.txt');
+    log(`  File status: ${resp.status}`, 'ok');
+    const text = await resp.text();
+    log(`  File size: ${text.length} chars`);
+
+    // Parse
+    const lines = text.split('\n');
+    const dataLines = lines.filter(l => l.trim() && !l.startsWith('*') && !l.startsWith('Freq'));
+    log(`  Data lines: ${dataLines.length}`);
+
+    const fArr = [], rArr = [];
+    for (const line of dataLines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length >= 2) {
+        const f = parseFloat(parts[0]), v = parseFloat(parts[1]);
+        if (!isNaN(f) && !isNaN(v)) { fArr.push(f); rArr.push(v); }
+      }
+    }
+    log(`  Parsed: ${fArr.length} points, range ${fArr[0]} - ${fArr[fArr.length-1]} Hz`);
+
+    const fileInput = { frequency: fArr, raw: rArr, config: '8_PEAKING_WITH_SHELVES', name: 'test', fs: 44100, max_gain: 6 };
+    const fileJson = JSON.stringify(fileInput);
+    log(`  JSON size: ${fileJson.length} chars`);
+
+    const t0 = performance.now();
+    const resultJson = optimize_parametric_eq_js(fileJson);
+    const t1 = performance.now();
+    log(`  PEQ time: ${(t1 - t0).toFixed(1)} ms`, 'ok');
+
+    const result = JSON.parse(resultJson);
+    if (result.error) {
+      log(`  PEQ error: ${result.error}`, 'err');
+    } else {
+      log(`  PEQ: preamp=${result.preamp.toFixed(1)}, ${result.filters.length} filters`, 'ok');
+      result.filters.forEach((f, i) => {
+        log(`    [${i+1}] ${f.type} fc=${f.fc.toFixed(0)} Hz gain=${f.gain.toFixed(1)} dB Q=${f.q.toFixed(2)}`);
+      });
+    }
+  } catch (e) {
+    log(`  File test FAIL: ${e.message}`, 'err');
+    log(`  Stack: ${e.stack}`, 'err');
+  }
+
+  log('\n=== DONE ===', 'ok');
+}
+
+main();
+</script>
+</body>
+</html>

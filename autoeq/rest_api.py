@@ -518,6 +518,21 @@ class EqRangeRequest(BaseModel):
     max_filters: Optional[int] = Field(default=None, description="最大滤波器数量，不设置则返回所有匹配的滤波器")
     gain_range: Optional[GainRange] = Field(default=None, description="增益过滤范围")
     q_range: Optional[QRange] = Field(default=None, description="Q值过滤范围")
+    window_size: float = Field(default=1/24, description="平滑窗口大小（倍频程），越小越贴合原始曲线")
+    treble_window_size: float = Field(default=1.0, description="高频平滑窗口大小，越小高频越贴合")
+    treble_f_lower: float = Field(default=6000.0, description="高频处理下限频率，Hz")
+    treble_f_upper: float = Field(default=8000.0, description="高频处理上限频率，Hz")
+    treble_gain_k: float = Field(default=1.0, description="高频增益系数，>1更激进，<1更保守")
+    max_gain: float = Field(default=20.0, description="最大增益限制，dB")
+    max_slope: float = Field(default=18.0, description="EQ曲线最大斜率限制，dB/倍频程")
+    tilt: float = Field(default=0.0, description="目标曲线倾斜度，正数=温暖，负数=明亮，dB/倍频程")
+    bass_boost_gain: float = Field(default=0.0, description="低音增强量，dB")
+    bass_boost_fc: float = Field(default=105.0, description="低音增强中心频率，Hz")
+    bass_boost_q: float = Field(default=0.7, description="低音增强Q值")
+    treble_boost_gain: float = Field(default=0.0, description="高音增强量，dB")
+    treble_boost_fc: float = Field(default=10000.0, description="高音增强中心频率，Hz")
+    treble_boost_q: float = Field(default=0.7, description="高音增强Q值")
+    min_mean_error: bool = Field(default=False, description="最小化平均误差，避免1kHz处偏差影响整体")
 
 
 class EqRangeFilterOutput(BaseModel):
@@ -535,6 +550,7 @@ class EqRangeResponse(BaseModel):
     q_range: Optional[QRange] = Field(default=None, description="Q值过滤范围")
     fs: int = Field(..., description="采样率，单位Hz")
     max_filters: Optional[int] = Field(default=None, description="最大滤波器数量限制")
+    params: dict = Field(..., description="使用的处理参数")
 
 
 @app.post("/eq-by-range", response_model=EqRangeResponse, summary="按频率范围生成参数均衡器")
@@ -558,15 +574,22 @@ async def eq_by_range(request: EqRangeRequest):
 
         fr.process(
             target=target,
-            bass_boost_gain=DEFAULT_BASS_BOOST_GAIN,
-            bass_boost_fc=DEFAULT_BASS_BOOST_FC,
-            bass_boost_q=DEFAULT_BASS_BOOST_Q,
-            treble_boost_gain=DEFAULT_TREBLE_BOOST_GAIN,
-            treble_boost_fc=DEFAULT_TREBLE_BOOST_FC,
-            treble_boost_q=DEFAULT_TREBLE_BOOST_Q,
-            tilt=DEFAULT_TILT,
+            bass_boost_gain=request.bass_boost_gain,
+            bass_boost_fc=request.bass_boost_fc,
+            bass_boost_q=request.bass_boost_q,
+            treble_boost_gain=request.treble_boost_gain,
+            treble_boost_fc=request.treble_boost_fc,
+            treble_boost_q=request.treble_boost_q,
+            tilt=request.tilt,
             fs=request.fs,
-            max_gain=DEFAULT_MAX_GAIN,
+            max_gain=request.max_gain,
+            max_slope=request.max_slope,
+            window_size=request.window_size,
+            treble_window_size=request.treble_window_size,
+            treble_f_lower=request.treble_f_lower,
+            treble_f_upper=request.treble_f_upper,
+            treble_gain_k=request.treble_gain_k,
+            min_mean_error=request.min_mean_error,
         )
 
         peq_config = PEQ_CONFIGS.get(request.config, PEQ_CONFIGS['8_PEAKING_WITH_SHELVES'])
@@ -609,7 +632,24 @@ async def eq_by_range(request: EqRangeRequest):
             'gain_range': request.gain_range,
             'q_range': request.q_range,
             'fs': request.fs,
-            'max_filters': request.max_filters
+            'max_filters': request.max_filters,
+            'params': {
+                'window_size': request.window_size,
+                'treble_window_size': request.treble_window_size,
+                'treble_f_lower': request.treble_f_lower,
+                'treble_f_upper': request.treble_f_upper,
+                'treble_gain_k': request.treble_gain_k,
+                'max_gain': request.max_gain,
+                'max_slope': request.max_slope,
+                'tilt': request.tilt,
+                'bass_boost_gain': request.bass_boost_gain,
+                'bass_boost_fc': request.bass_boost_fc,
+                'bass_boost_q': request.bass_boost_q,
+                'treble_boost_gain': request.treble_boost_gain,
+                'treble_boost_fc': request.treble_boost_fc,
+                'treble_boost_q': request.treble_boost_q,
+                'min_mean_error': request.min_mean_error,
+            }
         }
 
     except Exception as e:

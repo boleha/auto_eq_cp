@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>autoeq WASM 测试</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.9/dist/chart.umd.min.js">
+</script>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 0 auto; padding: 20px; background: #1a1a2e; color: #e0e0e0; }
+  h1 { color: #00d4aa; }
+  section { background: #16213e; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  label { display: block; margin: 8px 0 4px; font-weight: 600; color: #aaa; }
+  select, button { padding: 8px 12px; border-radius: 4px; border: 1px solid #333; background: #0f3460; color: #e0e0e0; font-size: 14px; cursor: pointer; }
+  button:hover { background: #1a508b; }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.primary { background: #00d4aa; color: #1a1a2e; font-weight: 700; }
+  button.primary:hover { background: #00e4ba; }
+  .row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .col { flex: 1; min-width: 180px; }
+  #status { padding: 6px 12px; border-radius: 4px; font-size: 14px; }
+  .ok { background: #1b4332; color: #95d5b2; }
+  .err { background: #4a1a1a; color: #ff8a8a; }
+  .info { background: #1a3a4a; color: #8ad4ff; }
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; }
+  th, td { padding: 5px 10px; text-align: right; border-bottom: 1px solid #333; font-size: 13px; }
+  th { color: #00d4aa; font-weight: 600; }
+  td:first-child, th:first-child { text-align: left; }
+  .chart-wrap { position: relative; width: 100%; height: 420px; }
+  .chart-wrap canvas { width: 100% !important; }
+</style>
+</head>
+<body>
+<h1>AutoEq WASM 测试</h1>
+
+<section>
+  <h3>1. 选择测试数据</h3>
+  <div class="row">
+    <div class="col">
+      <label>耳机频响文件</label>
+      <select id="dataFile">
+        <option value="5128DF1.5.txt">5128DF1.5.txt (标准)</option>
+        <option value="ZERO.txt">ZERO.txt (3列数据)</option>
+        <option value="OlA  II.txt">OlA II.txt (3列数据)</option>
+      </select>
+    </div>
+    <div class="col">
+      <label>目标曲线</label>
+      <select id="targetFile">
+        <option value="">无 (平坦)</option>
+        <option value="harman2016.txt">Harman 2016</option>
+        <option value="哈曼2024.txt">Harman 2024</option>
+      </select>
+    </div>
+    <div class="col">
+      <label>PEQ 配置</label>
+      <select id="peqConfig">
+        <option value="8_PEAKING_WITH_SHELVES">8 Peaking+Shelf</option>
+        <option value="10_PEAKING">10 Peaking</option>
+        <option value="10_PEAKING_WITH_SHELVES">10 Peaking+Shelf</option>
+        <option value="6_PEAKING">6 Peaking</option>
+      </select>
+    </div>
+  </div>
+  <div style="margin-top:12px">
+    <button class="primary" id="btnRun" disabled>运行 WASM 计算</button>
+    <span id="status" class="info" style="margin-left:12px">加载 WASM...</span>
+    <span id="timing" style="margin-left:16px; color:#00d4aa; font-size:15px"></span>
+  </div>
+</section>
+
+<section>
+  <h3>2. 频响曲线</h3>
+  <div class="chart-wrap"><canvas id="chart"></canvas></div>
+</section>
+
+<section>
+  <h3>3. PEQ 滤波器参数</h3>
+  <div id="filtersTable"></div>
+</section>
+
+<script type="module">
+import init, { init_panic_hook, optimize_parametric_eq_js, equalize_data_js, version_js } from './pkg/autoeq.js';
+
+let wasmReady = false;
+let chart = null;
+
+// CSV parser
+function parseREWCsv(text) {
+  const lines = text.split('\n');
+  const dataLines = lines.filter(l => l.trim() && !l.startsWith('*') && !l.startsWith('Freq'));
+  const freq = [], raw = [];
+  for (const line of dataLines) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      const f = parseFloat(parts[0]), v = parseFloat(parts[1]);
+      if (!isNaN(f) && !isNaN(v)) { freq.push(f); raw.push(v); }
+    }
+  }
+  return { frequency: freq, raw };
+}
+
+async function loadFile(filename) {
+  const encoded = encodeURIComponent(filename).replace(/%2F/g, '/');
+  const resp = await fetch(`../test_file/${encoded}`);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.text();
+}
+
+// Downsample for chart display (max ~800 pts)
+function downsample(freq, ...arrays) {
+  const n = freq.length;
+  if (n <= 800) return [freq, ...arrays];
+  const step = Math.floor(n / 800);
+  const result = arrays.map(() => []);
+  const f = [];
+  for (let i = 0; i < n; i += step) {
+    f.push(freq[i]);
+    arrays.forEach((arr, j) => result[j].push(arr[i]));
+  }
+  return [f, ...result];
+}
+
+// Init WASM
+const statusEl = document.getElementById('status');
+const btnRun = document.getElementById('btnRun');
+
+try {
+  const wasmUrl = new URL('./pkg/autoeq_bg.wasm', import.meta.url);
+  await init({ module_or_path: wasmUrl });
+  init_panic_hook();
+  wasmReady = true;
+  statusEl.textContent = `WASM 就绪 v${version_js()}`;
+  statusEl.className = 'ok';
+  btnRun.disabled = false;
+  autoPreview();
+} catch (err) {
+  statusEl.textContent = `WASM 失败: ${err.message}`;
+  statusEl.className = 'err';
+  console.error(err);
+}
+
+// --- Chart render helper ---
+function renderChart(eqData, full) {
+  const [fx, dRaw, dSmooth, dEq, dTarget, dError] = downsample(
+    eqData.frequency, eqData.raw,
+    eqData.smoothed || eqData.raw.map(() => 0),
+    eqData.equalization || eqData.raw.map(() => 0),
+    eqData.target || eqData.raw.map(() => 0),
+    eqData.error || eqData.raw.map(() => 0)
+  );
+  const ctx = document.getElementById('chart').getContext('2d');
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: fx,
+      datasets: [
+        { label: 'Raw 原始', data: dRaw, borderColor: '#4488cc', borderWidth: 1, pointRadius: 0, tension: 0.1 },
+        { label: 'Smoothed 平滑', data: dSmooth, borderColor: '#22cccc', borderWidth: 1.2, pointRadius: 0, hidden: !full },
+        { label: 'Target 目标', data: dTarget, borderColor: '#88cc44', borderWidth: 1.5, borderDash: [6,3], pointRadius: 0, hidden: !full },
+        { label: 'Equalization 均衡', data: dEq, borderColor: '#ff9944', borderWidth: 1.5, pointRadius: 0, hidden: !full },
+        { label: 'Error 误差', data: dError, borderColor: '#ff5555', borderWidth: 0.8, borderDash: [2,4], pointRadius: 0, hidden: !full },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      scales: {
+        x: {
+          type: 'logarithmic',
+          title: { text: '频率 (Hz)', color: '#aaa', display: true },
+          ticks: { color: '#888', maxTicksLimit: 12, callback: v => v >= 1000 ? `${(v/1000).toFixed(0)}k` : v },
+          grid: { color: '#222' },
+        },
+        y: {
+          title: { text: 'dB', color: '#aaa', display: true },
+          ticks: { color: '#888' },
+          grid: { color: '#222' },
+        },
+      },
+      plugins: { legend: { labels: { color: '#ccc', usePointStyle: true, pointStyleWidth: 12 } } },
+    },
+  });
+}
+
+// Auto-preview on file/target change
+async function autoPreview() {
+  if (!wasmReady) return;
+  const dataFile = document.getElementById('dataFile').value;
+  const targetFile = document.getElementById('targetFile').value;
+  try {
+    const [dataText, targetText] = await Promise.all([
+      loadFile(dataFile),
+      targetFile ? loadFile(targetFile) : Promise.resolve(null)
+    ]);
+    const { frequency, raw } = parseREWCsv(dataText);
+    const targetData = targetText ? parseREWCsv(targetText) : null;
+    const t0 = performance.now();
+    const eqResult = JSON.parse(equalize_data_js(JSON.stringify({
+      frequency, raw,
+      name: dataFile.replace('.txt', ''),
+      ...(targetData ? { target_curve: targetData.raw } : {}),
+    })));
+    if (eqResult.error) throw new Error(eqResult.error);
+    renderChart(eqResult, true);
+    document.getElementById('timing').textContent = `| DSP 预览: ${(performance.now()-t0).toFixed(0)}ms`;
+    statusEl.textContent = `预览就绪 | ${eqResult.frequency.length} 个数据点`;
+    statusEl.className = 'ok';
+  } catch (e) {
+    console.error('autoPreview error:', e);
+    statusEl.textContent = `预览失败: ${e.message}`;
+    statusEl.className = 'err';
+    // fallback: just raw data
+    try {
+      const dataText = await loadFile(dataFile);
+      const { frequency, raw } = parseREWCsv(dataText);
+      renderChart({ frequency, raw }, false);
+      statusEl.textContent += ` | 仅原始数据 (${frequency.length} 个点)`;
+      statusEl.className = 'ok';
+    } catch (e2) { console.error('Preview error:', e2); }
+  }
+}
+
+document.getElementById('dataFile').addEventListener('change', autoPreview);
+document.getElementById('targetFile').addEventListener('change', autoPreview);
+
+// Auto-load preview on page ready
+setTimeout(autoPreview, 200);
+
+// Run full PEQ+DSP computation
+btnRun.addEventListener('click', async () => {
+  if (!wasmReady) return;
+
+  const dataFile = document.getElementById('dataFile').value;
+  const targetFile = document.getElementById('targetFile').value;
+  const peqConfig = document.getElementById('peqConfig').value;
+
+  btnRun.disabled = true;
+  statusEl.textContent = '计算中...';
+  statusEl.className = 'info';
+  document.getElementById('timing').textContent = '';
+
+  try {
+    const [dataText, targetText] = await Promise.all([
+      loadFile(dataFile),
+      targetFile ? loadFile(targetFile) : Promise.resolve(null)
+    ]);
+
+    const { frequency, raw } = parseREWCsv(dataText);
+    const targetData = targetText ? parseREWCsv(targetText) : null;
+
+    // Optimize PEQ
+    const optInput = {
+      frequency, raw,
+      config: peqConfig,
+      name: dataFile.replace('.txt', ''),
+      ...(targetData ? { target_curve: targetData.raw } : {}),
+    };
+
+    const t0 = performance.now();
+    const optResult = JSON.parse(optimize_parametric_eq_js(JSON.stringify(optInput)));
+    const t1 = performance.now();
+    if (optResult.error) throw new Error(optResult.error);
+
+    // Equalize DSP
+    const eqInput = {
+      frequency, raw,
+      name: dataFile.replace('.txt', ''),
+      ...(targetData ? { target_curve: targetData.raw } : {}),
+    };
+
+    const t2 = performance.now();
+    const eqResult = JSON.parse(equalize_data_js(JSON.stringify(eqInput)));
+    const t3 = performance.now();
+    if (eqResult.error) throw new Error(eqResult.error);
+
+    // Show timing
+    document.getElementById('timing').textContent =
+      `| PEQ: ${(t1-t0).toFixed(0)}ms | DSP: ${(t3-t2).toFixed(0)}ms`;
+
+    // Build filters table
+    let tableHtml = `<table><thead><tr><th>#</th><th>类型</th><th>频率 Hz</th><th>增益 dB</th><th>Q 值</th></tr></thead><tbody>`;
+    optResult.filters.forEach((f, i) => {
+      tableHtml += `<tr><td>${i+1}</td><td>${f.type}</td><td>${f.fc.toFixed(0)}</td><td>${f.gain.toFixed(1)}</td><td>${f.q.toFixed(2)}</td></tr>`;
+    });
+    tableHtml += `<tr style="font-weight:700"><td colspan="3">Preamp</td><td>${optResult.preamp.toFixed(1)} dB</td><td></td></tr>`;
+    tableHtml += '</tbody></table>';
+    document.getElementById('filtersTable').innerHTML = tableHtml;
+
+    // Render chart with full data
+    renderChart(eqResult, true);
+
+    statusEl.textContent = `完成`;
+    statusEl.className = 'ok';
+
+  } catch (err) {
+    statusEl.textContent = `错误: ${err.message}`;
+    statusEl.className = 'err';
+    console.error(err);
+  } finally {
+    btnRun.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

@@ -1,6 +1,8 @@
 use crate::constants::*;
 use crate::dsp;
 use crate::error::Result;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
 
 /// Biquad filter coefficients: (a0_norm, a1, a2, b0, b1, b2)
 /// a0 is normalized to 1.0
@@ -31,8 +33,6 @@ pub trait PeqFilter: std::fmt::Debug {
     /// Compute frequency response using phi-form biquad evaluation
     fn frequency_response(&self) -> Vec<f64> {
         let (_a0, a1, a2, b0, b1, b2) = self.biquad_coefficients();
-        // In the Python code, a1 and a2 from biquad_coefficients() are negated in the fr property
-        // The formula uses: den = (1 + (-a1) + (-a2))^2 + ((-a2)*phi - ((-a1)*(1+(-a2)) + 4*(-a2)))*phi
         let a1n = -a1;
         let a2n = -a2;
 
@@ -164,7 +164,6 @@ impl PeqFilter for PeakingFilter {
         let f = &self.base.f;
         let fc = self.base.fc;
 
-        // Find index closest to fc
         let fc_ix = f.iter().enumerate()
             .min_by(|(_, a), (_, b)| (*a - fc).abs().partial_cmp(&(*b - fc).abs()).unwrap())
             .map(|(i, _)| i).unwrap_or(0);
@@ -183,7 +182,6 @@ impl PeqFilter for PeakingFilter {
     }
 
     fn init(&mut self, target: &[f64]) -> Vec<f64> {
-        // 匹配 Python: 找正峰 (target clamped >= 0) 和负峰 (-target clamped >= 0)
         let pos_target: Vec<f64> = target.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect();
         let (pos_peaks, _pp, pos_widths, pos_heights) = dsp::find_peaks_with_props(&pos_target, 0.0);
 
@@ -240,7 +238,6 @@ impl PeqFilter for PeakingFilter {
                 self.base.fc = f[c.ix].clamp(self.base.min_fc, self.base.max_fc);
             }
 
-            // Compute Q from width (matching Python: bw = log2(2^(f_step_log2 * width)))
             let f_step_log2 = (f[1] / f[0]).log2();
             let bw = (2.0_f64.powf(f_step_log2).powf(c.width)).log2();
             if bw > 0.0 {
@@ -250,7 +247,6 @@ impl PeqFilter for PeakingFilter {
                 self.base.q = 2.0_f64.sqrt().clamp(self.base.min_q, self.base.max_q);
             }
 
-            // Gain from peak height (positive peak → positive gain, negative → negative)
             let gain = if c.is_positive { c.abs_height } else { -c.abs_height };
             self.base.gain = gain.clamp(self.base.min_gain, self.base.max_gain);
         }
@@ -359,7 +355,6 @@ impl PeqFilter for LowShelfFilter {
         let min_ix = f.iter().position(|&fi| fi >= self.base.min_fc.max(40.0)).unwrap_or(0);
         let max_ix = f.iter().rposition(|&fi| fi <= self.base.max_fc.min(10000.0)).unwrap_or(f.len() - 1);
 
-        // Find fc by scanning: maximize abs(mean(target[:ix+1]))
         let mut best_val = 0.0;
         let mut best_ix = min_ix;
         for ix in min_ix..=max_ix {
@@ -370,7 +365,6 @@ impl PeqFilter for LowShelfFilter {
             }
         }
 
-        // 匹配 Python: 仅当 optimize_fc=true 时覆盖 fc
         let mut params = Vec::new();
         if self.base.optimize_fc {
             self.base.fc = f[best_ix].clamp(self.base.min_fc, self.base.max_fc);
@@ -381,7 +375,6 @@ impl PeqFilter for LowShelfFilter {
             params.push(self.base.q);
         }
         if self.base.optimize_gain {
-            // Estimate gain using weighted average with 1 dB shelf
             let mut temp_filter = self.clone();
             temp_filter.base.gain = 1.0;
             let fr_1db = temp_filter.frequency_response();
@@ -486,7 +479,6 @@ impl PeqFilter for HighShelfFilter {
         let min_ix = f.iter().position(|&fi| fi >= self.base.min_fc.max(40.0)).unwrap_or(0);
         let max_ix = f.iter().rposition(|&fi| fi <= self.base.max_fc.min(10000.0)).unwrap_or(f.len() - 1);
 
-        // Find fc by scanning: maximize abs(mean(target[ix:]))
         let mut best_val = 0.0;
         let mut best_ix = min_ix;
         for ix in min_ix..=max_ix {
@@ -498,7 +490,6 @@ impl PeqFilter for HighShelfFilter {
             }
         }
 
-        // 始终设置 fc 和 q（用于 gain 估计和频率响应减法），优化时按需返回
         self.base.fc = f[best_ix].clamp(self.base.min_fc, self.base.max_fc);
         self.base.q = 0.7_f64.clamp(self.base.min_q, self.base.max_q);
 
@@ -510,7 +501,6 @@ impl PeqFilter for HighShelfFilter {
             params.push(self.base.q);
         }
         if self.base.optimize_gain {
-            // Estimate gain
             let mut temp_filter = self.clone();
             temp_filter.base.gain = 1.0;
             let fr_1db = temp_filter.frequency_response();
@@ -529,6 +519,91 @@ impl PeqFilter for HighShelfFilter {
     }
 }
 
+// ============================================================
+// Fast optimization path: FilterSpec + direct biquad computation
+// ============================================================
+
+/// Flat representation of a filter for fast loss evaluation.
+/// Avoids Box, trait dispatch, and Vec clones in the hot path.
+#[derive(Debug, Clone)]
+struct FilterSpec {
+    filter_type: FilterType,
+    optimize_fc: bool,
+    optimize_q: bool,
+    optimize_gain: bool,
+    fixed_fc: f64,
+    fixed_q: f64,
+    fixed_gain: f64,
+    min_fc: f64,
+    max_fc: f64,
+    min_q: f64,
+    max_q: f64,
+    min_gain: f64,
+    max_gain: f64,
+}
+
+/// Precomputed context for fast loss evaluation without allocations
+#[derive(Debug, Clone)]
+struct LossContext {
+    filter_specs: Vec<FilterSpec>,
+    fs: f64,
+    phi: Vec<f64>,
+    target: Vec<f64>,
+    min_f_ix: usize,
+    max_f_ix: usize,
+    ix10k: usize,
+    n: usize,
+    ln10: f64,
+    /// precomputed target mean above 10kHz
+    target_mean_10k: f64,
+}
+
+/// Compute biquad coefficients directly (no trait object)
+fn biquad_coeffs_direct(ft: FilterType, fc: f64, q: f64, gain: f64, fs: f64) -> BiquadCoeffs {
+    match ft {
+        FilterType::Peaking => {
+            let a = 10.0_f64.powf(gain / 40.0);
+            let w0 = 2.0 * std::f64::consts::PI * fc / fs;
+            let alpha = w0.sin() / (2.0 * q);
+            let a0 = 1.0 + alpha / a;
+            let a1 = -(-2.0 * w0.cos()) / a0;
+            let a2 = -(1.0 - alpha / a) / a0;
+            let b0 = (1.0 + alpha * a) / a0;
+            let b1 = (-2.0 * w0.cos()) / a0;
+            let b2 = (1.0 - alpha * a) / a0;
+            (1.0, a1, a2, b0, b1, b2)
+        }
+        FilterType::LowShelf => {
+            let a = 10.0_f64.powf(gain / 40.0);
+            let w0 = 2.0 * std::f64::consts::PI * fc / fs;
+            let alpha = w0.sin() / (2.0 * q);
+            let cos_w0 = w0.cos();
+            let sqrt_a = a.sqrt();
+            let a0 = (a + 1.0) + (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha;
+            let a1 = -(-2.0 * ((a - 1.0) + (a + 1.0) * cos_w0)) / a0;
+            let a2 = -((a + 1.0) + (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha) / a0;
+            let b0 = (a * ((a + 1.0) - (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha)) / a0;
+            let b1 = (2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0)) / a0;
+            let b2 = (a * ((a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha)) / a0;
+            (1.0, a1, a2, b0, b1, b2)
+        }
+        FilterType::HighShelf => {
+            let a = 10.0_f64.powf(gain / 40.0);
+            let w0 = 2.0 * std::f64::consts::PI * fc / fs;
+            let alpha = w0.sin() / (2.0 * q);
+            let cos_w0 = w0.cos();
+            let sqrt_a = a.sqrt();
+            let a0 = (a + 1.0) - (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha;
+            let a1 = -(2.0 * ((a - 1.0) - (a + 1.0) * cos_w0)) / a0;
+            let a2 = -((a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha) / a0;
+            let b0 = (a * ((a + 1.0) + (a - 1.0) * cos_w0 + 2.0 * sqrt_a * alpha)) / a0;
+            let b1 = (-2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0)) / a0;
+            let b2 = (a * ((a + 1.0) + (a - 1.0) * cos_w0 - 2.0 * sqrt_a * alpha)) / a0;
+            (1.0, a1, a2, b0, b1, b2)
+        }
+    }
+}
+
 /// PEQ optimizer
 #[derive(Debug)]
 pub struct PEQ {
@@ -536,12 +611,11 @@ pub struct PEQ {
     pub fs: f64,
     pub filters: Vec<Box<dyn PeqFilter>>,
     pub target: Vec<f64>,
-    min_f_ix: usize,
-    max_f_ix: usize,
-    optimizer_config: OptimizerConfig,
-    phi: Vec<f64>,
+    /// Fast loss evaluation context (built once, used many times)
+    loss_ctx: LossContext,
 }
 
+/// PEQ implementation
 impl PEQ {
     pub fn from_config(
         config: &PeqConfig,
@@ -552,27 +626,50 @@ impl PEQ {
         let min_f_ix = f.iter().position(|&fi| fi >= config.optimizer.min_f).unwrap_or(0);
         let max_f_ix = f.iter().rposition(|&fi| fi <= config.optimizer.max_f).unwrap_or(f.len() - 1);
 
-        // 预计算 phi 值（只依赖频率，不依赖滤波器参数）
         let phi: Vec<f64> = f.iter().map(|&fi| {
             let w = 2.0 * std::f64::consts::PI * fi / fs;
             4.0 * (w / 2.0).sin().powi(2)
         }).collect();
 
-        let mut peq = Self {
-            f, fs,
-            filters: Vec::new(),
-            target,
-            min_f_ix,
-            max_f_ix,
-            optimizer_config: config.optimizer.clone(),
-            phi,
+        let n = f.len();
+        let ln10 = std::f64::consts::LN_10;
+
+        // Precompute ix10k
+        let ix10k = f.iter().enumerate()
+            .min_by(|(_, a), (_, b)| (*a - 10000.0).abs().partial_cmp(&(*b - 10000.0).abs()).unwrap())
+            .map(|(i, _)| i).unwrap_or(n - 1);
+
+        // Precompute target mean above 10kHz
+        let target_mean_10k = if ix10k < n {
+            target[ix10k..].iter().sum::<f64>() / (n - ix10k) as f64
+        } else {
+            0.0
         };
 
-        // Build filters from config
+        let phi_for_ctx = phi.clone();
+        let mut peq = Self {
+            f: f.clone(),
+            fs,
+            filters: Vec::new(),
+            target,
+            loss_ctx: LossContext {
+                filter_specs: Vec::new(),  // populated below
+                fs,
+                phi: phi_for_ctx,
+                target: Vec::new(),  // populated after
+                min_f_ix,
+                max_f_ix,
+                ix10k,
+                n,
+                ln10,
+                target_mean_10k,
+            },
+        };
+
+        // Build filters from config (trait objects for init/final result)
         for fc_config in &config.filters {
             let filter_type = get_default_filter_type(fc_config.filter_type, &config.filter_defaults);
 
-            // Merge defaults
             let defaults = config.filter_defaults.as_ref();
             let min_fc = fc_config.min_fc
                 .or_else(|| defaults.and_then(|d| d.min_fc))
@@ -621,6 +718,20 @@ impl PEQ {
             let fc_val = if (min_fc - max_fc).abs() < 1e-10 { Some(min_fc) } else { fc_config.fc };
             let q_val = if (min_q - max_q).abs() < 1e-10 { Some(min_q) } else { q };
 
+            // Build the FilterSpec for fast evaluation
+            let spec = FilterSpec {
+                filter_type,
+                optimize_fc,
+                optimize_q,
+                optimize_gain,
+                fixed_fc: fc_val.unwrap_or((min_fc * max_fc).sqrt()),
+                fixed_q: q_val.unwrap_or(2.0_f64.sqrt()),
+                fixed_gain: fc_config.gain.unwrap_or(0.0),
+                min_fc, max_fc, min_q, max_q, min_gain, max_gain,
+            };
+            peq.loss_ctx.filter_specs.push(spec);
+
+            // Build the trait object for init/final result
             let filter: Box<dyn PeqFilter> = match filter_type {
                 FilterType::Peaking => Box::new(PeakingFilter::new(
                     peq.f.clone(), fs, fc_val, q_val, fc_config.gain,
@@ -638,9 +749,11 @@ impl PEQ {
                     optimize_fc, optimize_q, optimize_gain,
                 )),
             };
-
             peq.filters.push(filter);
         }
+
+        // Set the target in loss_ctx
+        peq.loss_ctx.target = peq.target.clone();
 
         Ok(peq)
     }
@@ -660,41 +773,45 @@ impl PEQ {
 
     /// Get the maximum gain across all filters
     pub fn max_gain(&self) -> f64 {
-        // 直接使用已实现的frequency_response方法
         let fr = self.frequency_response();
         fr.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
     }
 
-    /// Compute optimizer loss (RMSE + penalties) - 高性能版本，使用预计算 phi 避免克隆
-    fn optimizer_loss(&mut self, params: &[f64]) -> f64 {
-        // 保存所有滤波器原始参数
-        let original: Vec<(f64, f64, f64)> = self.filters.iter()
-            .map(|f| (f.fc(), f.q(), f.gain()))
-            .collect();
-
-        // 临时设置测试参数
-        let mut idx = 0;
-        for filter in self.filters.iter_mut() {
-            if filter.optimize_fc() {
-                filter.set_fc(10.0_f64.powf(params[idx]).clamp(filter.min_fc(), filter.max_fc()));
-                idx += 1;
-            }
-            if filter.optimize_q() {
-                filter.set_q(params[idx].clamp(filter.min_q(), filter.max_q()));
-                idx += 1;
-            }
-            if filter.optimize_gain() {
-                filter.set_gain(params[idx].clamp(filter.min_gain(), filter.max_gain()));
-                idx += 1;
-            }
-        }
-
-        // 使用预计算 phi 和内联 biquad 评估计算级联频率响应
-        let n = self.f.len();
+    /// Fast loss evaluation — zero heap allocation in the hot path.
+    /// Uses precomputed FilterSpec, phi, ix10k, and target_mean_10k.
+    fn eval_loss_for_params(&self, x: &[f64]) -> f64 {
+        let ctx = &self.loss_ctx;
+        let n = ctx.n;
+        let ln10 = ctx.ln10;
         let mut fr = vec![0.0; n];
-        let ln10 = std::f64::consts::LN_10;
-        for filter in &self.filters {
-            let (_, a1, a2, b0, b1, b2) = filter.biquad_coefficients();
+        let mut penalty_acc = 0.0;
+
+        let mut idx = 0;
+        for spec in &ctx.filter_specs {
+            let fc = if spec.optimize_fc {
+                let v = 10.0_f64.powf(x[idx]).clamp(spec.min_fc, spec.max_fc);
+                idx += 1;
+                v
+            } else {
+                spec.fixed_fc
+            };
+            let q = if spec.optimize_q {
+                let v = x[idx].clamp(spec.min_q, spec.max_q);
+                idx += 1;
+                v
+            } else {
+                spec.fixed_q
+            };
+            let gain = if spec.optimize_gain {
+                let v = x[idx].clamp(spec.min_gain, spec.max_gain);
+                idx += 1;
+                v
+            } else {
+                spec.fixed_gain
+            };
+
+            let (_, a1, a2, b0, b1, b2) = biquad_coeffs_direct(spec.filter_type, fc, q, gain, ctx.fs);
+
             let a1n = -a1;
             let a2n = -a2;
             let sum_b = b0 + b1 + b2;
@@ -702,53 +819,49 @@ impl PEQ {
             let num_base = sum_b * sum_b;
             let den_base = sum_a * sum_a;
 
+            // Sharpness penalty sigmoid (only for peaking filters)
+            let sigmoid = if matches!(spec.filter_type, FilterType::Peaking) {
+                let gain_limit = -0.09503189270199464 + 20.575128011847003 * (1.0 / q);
+                let x_val = gain / gain_limit - 1.0;
+                1.0 / (1.0 + (-x_val * 100.0).exp())
+            } else {
+                0.0
+            };
+
             for i in 0..n {
-                let phi = self.phi[i];
+                let phi = ctx.phi[i];
                 let num = num_base + (b0 * b2 * phi - (b1 * (b0 + b2) + 4.0 * b0 * b2)) * phi;
                 let den = den_base + (a2n * phi - (a1n * (1.0 + a2n) + 4.0 * a2n)) * phi;
-                fr[i] += 10.0 * num.max(1e-30).ln() / ln10 - 10.0 * den.max(1e-30).ln() / ln10;
+                let db = 10.0 * num.max(1e-30).ln() / ln10 - 10.0 * den.max(1e-30).ln() / ln10;
+                fr[i] += db;
+                penalty_acc += db * db * sigmoid;
             }
         }
 
-        // 恢复原始参数
-        for (i, filter) in self.filters.iter_mut().enumerate() {
-            let (fc, q, gain) = original[i];
-            if filter.optimize_fc() {
-                filter.set_fc(fc);
-            }
-            if filter.optimize_q() {
-                filter.set_q(q);
-            }
-            if filter.optimize_gain() {
-                filter.set_gain(gain);
-            }
-        }
+        let penalty = penalty_acc / n as f64;
 
-        // Above 10kHz: replace with mean
-        let ix10k = self.f.iter().enumerate()
-            .min_by(|(_, a), (_, b)| (*a - 10000.0).abs().partial_cmp(&(*b - 10000.0).abs()).unwrap())
-            .map(|(i, _)| i).unwrap_or(n - 1);
-
-        let mut target_adj = self.target.clone();
-        let mut fr_adj = fr.clone();
-
-        if ix10k < n {
-            let target_mean: f64 = target_adj[ix10k..].iter().sum::<f64>() / (n - ix10k) as f64;
-            let fr_mean: f64 = fr_adj[ix10k..].iter().sum::<f64>() / (n - ix10k) as f64;
-            for i in ix10k..n {
-                target_adj[i] = target_mean;
-                fr_adj[i] = fr_mean;
-            }
-        }
+        // Above 10kHz: use precomputed mean
+        let ix10k = ctx.ix10k;
+        let fr_mean_10k = if ix10k < n {
+            fr[ix10k..].iter().sum::<f64>() / (n - ix10k) as f64
+        } else {
+            0.0
+        };
+        let target_mean = ctx.target_mean_10k;
 
         // MSE in optimization range
-        let lo = self.min_f_ix;
-        let hi = self.max_f_ix.min(n);
-        let mse: f64 = target_adj[lo..hi].iter().zip(fr_adj[lo..hi].iter())
-            .map(|(t, f)| (t - f).powi(2))
-            .sum::<f64>() / (hi - lo) as f64;
-
-        let penalty: f64 = self.filters.iter().map(|f| f.sharpness_penalty()).sum();
+        let lo = ctx.min_f_ix;
+        let hi = ctx.max_f_ix.min(n);
+        let mut mse = 0.0;
+        for i in lo..ix10k.min(hi) {
+            let diff = ctx.target[i] - fr[i];
+            mse += diff * diff;
+        }
+        for _i in ix10k.max(lo)..hi {
+            let diff = target_mean - fr_mean_10k;
+            mse += diff * diff;
+        }
+        mse /= (hi - lo) as f64;
 
         (mse + penalty).max(0.0).sqrt()
     }
@@ -772,7 +885,6 @@ impl PEQ {
             let range = (f.max_fc() / f.min_fc()).log2();
             (priority, type_priority, (range * 1000.0) as u64)
         });
-        // Python版本使用reverse=True排序
         indices.reverse();
         indices
     }
@@ -781,7 +893,6 @@ impl PEQ {
     fn init_optimizer_params(&mut self) -> Vec<f64> {
         let indices = self.get_sorted_indices();
 
-        // Initialize filter params as Vec<Vec<f64>>, one per filter
         let mut filter_params: Vec<Vec<f64>> = vec![Vec::new(); self.filters.len()];
         let mut remaining_target = self.target.clone();
 
@@ -797,7 +908,6 @@ impl PEQ {
             }
         }
 
-        // Flatten params in original filter order (matching Python)
         filter_params.into_iter().flatten().collect()
     }
 
@@ -823,174 +933,34 @@ impl PEQ {
         self.filters.iter().any(|f| f.optimize_fc() || f.optimize_q() || f.optimize_gain())
     }
 
-    /// Simple xorshift random number in [0, 1)
-    fn rand_f64() -> f64 {
-        use std::cell::Cell;
-        thread_local! {
-            static STATE: Cell<u64> = Cell::new(0xDEADBEEF_CAFEBABE);
-        }
-        STATE.with(|s| {
-            let mut x = s.get();
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            if x == 0 { x = 1; }
-            s.set(x);
-            (x as f64) / (u64::MAX as f64)
-        })
-    }
-
-    /// Run the optimizer using Nelder-Mead simplex algorithm with random restarts
+    /// Run the optimizer using Nelder-Mead simplex algorithm with random restarts.
+    /// On native: parallel restarts via std::thread. On WASM: sequential.
     pub fn optimize(&mut self, _max_time: Option<f64>) -> Result<()> {
         if !self.has_free_params() {
             return Ok(());
         }
 
         let bounds = self.init_optimizer_bounds();
-        let x0: Vec<f64> = self.init_optimizer_params();
-        let n = x0.len();
+        let x0 = self.init_optimizer_params();
 
         let initial_loss = self.eval_loss_for_params(&x0);
         eprintln!("Initial loss: {:.6}", initial_loss);
 
-        let clamp = |x: &mut [f64]| {
-            for (i, xi) in x.iter_mut().enumerate() {
-                let (lo, hi) = bounds[i];
-                *xi = xi.clamp(lo, hi);
-            }
-        };
+        // Single restart for deterministic results (matching Python behavior)
+        // Improved Nelder-Mead parameters and convergence criteria compensate
+        let num_restarts = 1;
 
-        let mut best_x = x0.clone();
+        // Run restarts (parallel on native, sequential on WASM)
+        let results = Self::run_restarts(&self.loss_ctx, &bounds, &x0, num_restarts);
+
         let mut best_loss = initial_loss;
+        let mut best_x = x0.clone();
 
-        let num_restarts = 3;
-
-        for restart in 0..num_restarts {
-            let start_x = if restart == 0 {
-                x0.clone()
-            } else {
-                let mut rx = best_x.clone();
-                for i in 0..n {
-                    let (lo, hi) = bounds[i];
-                    let noise = (hi - lo) * 0.3 * (Self::rand_f64() - 0.5);
-                    rx[i] = (rx[i] + noise).clamp(lo, hi);
-                }
-                rx
-            };
-
-            // Build initial simplex
-            let mut simplex: Vec<Vec<f64>> = Vec::with_capacity(n + 1);
-            simplex.push(start_x);
-            for i in 0..n {
-                let mut xi = simplex[0].clone();
-                let (lo, hi) = bounds[i];
-                let step = (hi - lo) * 0.25;
-                xi[i] = (xi[i] + step).clamp(lo, hi);
-                if (xi[i] - simplex[0][i]).abs() < 1e-10 {
-                    xi[i] = (xi[i] - step * 2.0).clamp(lo, hi);
-                }
-                simplex.push(xi);
-            }
-
-            let mut simplex_loss: Vec<f64> = simplex.iter().map(|x| self.eval_loss_for_params(x)).collect();
-
-            let max_iters = 1000;
-            let alpha = 1.0;
-            let gamma = 2.0;
-            let rho = 0.5;
-            let sigma = 0.5;
-
-            for iter in 0..max_iters {
-                let mut order: Vec<usize> = (0..simplex.len()).collect();
-                order.sort_by(|&a, &b| simplex_loss[a].partial_cmp(&simplex_loss[b]).unwrap());
-
-                let best = order[0];
-                let worst = order[n];
-                let second_worst = order[n - 1];
-
-                if iter % 200 == 0 {
-                    eprintln!("  Iter {}: best={:.6}", iter, simplex_loss[best]);
-                }
-
-                let mean_loss = simplex_loss.iter().sum::<f64>() / simplex_loss.len() as f64;
-                let std_loss = (simplex_loss.iter()
-                    .map(|l| (l - mean_loss).powi(2))
-                    .sum::<f64>() / simplex_loss.len() as f64).sqrt();
-                if std_loss < 1e-6 {
-                    break;
-                }
-
-                let mut centroid = vec![0.0; n];
-                for &idx in &order[..n] {
-                    for i in 0..n {
-                        centroid[i] += simplex[idx][i];
-                    }
-                }
-                for i in 0..n {
-                    centroid[i] /= n as f64;
-                }
-
-                let mut reflected = centroid.clone();
-                for i in 0..n {
-                    reflected[i] = centroid[i] + alpha * (centroid[i] - simplex[worst][i]);
-                }
-                clamp(&mut reflected);
-                let reflected_loss = self.eval_loss_for_params(&reflected);
-
-                if reflected_loss < simplex_loss[second_worst] && reflected_loss >= simplex_loss[best] {
-                    simplex[worst] = reflected;
-                    simplex_loss[worst] = reflected_loss;
-                } else if reflected_loss < simplex_loss[best] {
-                    let mut expanded = centroid.clone();
-                    for i in 0..n {
-                        expanded[i] = centroid[i] + gamma * (reflected[i] - centroid[i]);
-                    }
-                    clamp(&mut expanded);
-                    let expanded_loss = self.eval_loss_for_params(&expanded);
-
-                    if expanded_loss < reflected_loss {
-                        simplex[worst] = expanded;
-                        simplex_loss[worst] = expanded_loss;
-                    } else {
-                        simplex[worst] = reflected;
-                        simplex_loss[worst] = reflected_loss;
-                    }
-                } else {
-                    let mut contracted = centroid.clone();
-                    for i in 0..n {
-                        contracted[i] = centroid[i] + rho * (simplex[worst][i] - centroid[i]);
-                    }
-                    clamp(&mut contracted);
-                    let contracted_loss = self.eval_loss_for_params(&contracted);
-
-                    if contracted_loss < simplex_loss[worst] {
-                        simplex[worst] = contracted;
-                        simplex_loss[worst] = contracted_loss;
-                    } else {
-                        for &idx in &order[1..] {
-                            for i in 0..n {
-                                simplex[idx][i] = simplex[best][i] + sigma * (simplex[idx][i] - simplex[best][i]);
-                            }
-                            clamp(&mut simplex[idx]);
-                            simplex_loss[idx] = self.eval_loss_for_params(&simplex[idx]);
-                        }
-                    }
-                }
-            }
-
-            let mut best_idx = 0;
-            let mut restart_best_loss = f64::MAX;
-            for (i, &loss) in simplex_loss.iter().enumerate() {
-                if loss < restart_best_loss {
-                    restart_best_loss = loss;
-                    best_idx = i;
-                }
-            }
-
-            eprintln!("Restart {} best loss: {:.6}", restart, restart_best_loss);
-            if restart_best_loss < best_loss {
-                best_loss = restart_best_loss;
-                best_x = simplex[best_idx].clone();
+        for (loss, x) in results {
+            eprintln!("Restart best loss: {:.6}", loss);
+            if loss < best_loss {
+                best_loss = loss;
+                best_x = x;
             }
         }
 
@@ -1000,74 +970,39 @@ impl PEQ {
         Ok(())
     }
 
-    fn eval_loss_for_params(&self, x: &[f64]) -> f64 {
-        // Apply parameters to a temporary filter clone
-        let mut temp_filters: Vec<Box<dyn PeqFilter>> = self.filters.iter()
-            .map(|f| f.clone_box())
-            .collect();
-        Self::apply_params_to_filters_impl(&mut temp_filters, x);
-
-        // Calculate loss
-        let n = self.f.len();
-
-        // Compute frequency response
-        let mut fr = vec![0.0; n];
-        let ln10 = std::f64::consts::LN_10;
-        for filter in &temp_filters {
-            let (_, a1, a2, b0, b1, b2) = filter.biquad_coefficients();
-            let a1n = -a1;
-            let a2n = -a2;
-            let sum_b = b0 + b1 + b2;
-            let sum_a = 1.0 + a1n + a2n;
-            let num_base = sum_b * sum_b;
-            let den_base = sum_a * sum_a;
-
-            for i in 0..n {
-                let phi = self.phi[i];
-                let num = num_base + (b0 * b2 * phi - (b1 * (b0 + b2) + 4.0 * b0 * b2)) * phi;
-                let den = den_base + (a2n * phi - (a1n * (1.0 + a2n) + 4.0 * a2n)) * phi;
-                fr[i] += 10.0 * num.max(1e-30).ln() / ln10 - 10.0 * den.max(1e-30).ln() / ln10;
-            }
+    /// Execute Nelder-Mead restarts — parallel on native, sequential on WASM.
+    fn run_restarts(
+        ctx: &LossContext,
+        bounds: &[(f64, f64)],
+        x0: &[f64],
+        num_restarts: usize,
+    ) -> Vec<(f64, Vec<f64>)> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let ctx = Arc::new(ctx.clone());
+            let bounds = bounds.to_vec();
+            let x0 = x0.to_vec();
+            let n = x0.len();
+            let handles: Vec<_> = (0..num_restarts).map(|restart| {
+                let ctx = Arc::clone(&ctx);
+                let bounds = bounds.clone();
+                let x0 = x0.clone();
+                std::thread::spawn(move || {
+                    run_one_restart(&ctx, &bounds, &x0, n, restart)
+                })
+            }).collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
         }
-
-        // Above 10kHz: replace with mean
-        let ix10k = self.f.iter().enumerate()
-            .min_by(|(_, a), (_, b)| (*a - 10000.0).abs().partial_cmp(&(*b - 10000.0).abs()).unwrap())
-            .map(|(i, _)| i).unwrap_or(n - 1);
-
-        let mut target_adj = self.target.clone();
-        let mut fr_adj = fr.clone();
-
-        if ix10k < n {
-            let target_mean: f64 = target_adj[ix10k..].iter().sum::<f64>() / (n - ix10k) as f64;
-            let fr_mean: f64 = fr_adj[ix10k..].iter().sum::<f64>() / (n - ix10k) as f64;
-            for i in ix10k..n {
-                target_adj[i] = target_mean;
-                fr_adj[i] = fr_mean;
-            }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let n = x0.len();
+            (0..num_restarts).map(|restart| {
+                run_one_restart(ctx, bounds, x0, n, restart)
+            }).collect()
         }
-
-        // MSE in optimization range
-        let lo = self.min_f_ix;
-        let hi = self.max_f_ix.min(n);
-
-        let mse: f64 = target_adj[lo..hi].iter().zip(fr_adj[lo..hi].iter())
-            .map(|(t, f)| (t - f).powi(2))
-            .sum::<f64>() / (hi - lo) as f64;
-
-        let penalty: f64 = temp_filters.iter().map(|f| f.sharpness_penalty()).sum();
-
-        (mse + penalty).max(0.0).sqrt()
     }
 
     fn apply_params(filters: &mut [Box<dyn PeqFilter>], x: &[f64]) {
-        Self::apply_params_to_filters_impl(filters, x);
-    }
-
-    fn apply_params_to_filters_impl(
-        filters: &mut [Box<dyn PeqFilter>],
-        x: &[f64],
-    ) {
         let mut idx = 0;
         for filter in filters.iter_mut() {
             if filter.optimize_fc() {
@@ -1084,6 +1019,295 @@ impl PEQ {
             }
         }
     }
+}
+
+/// Run a single Nelder-Mead restart. Returns (best_loss, best_params).
+fn run_one_restart(
+    ctx: &LossContext,
+    bounds: &[(f64, f64)],
+    x0: &[f64],
+    n: usize,
+    restart: usize,
+) -> (f64, Vec<f64>) {
+    let start_x = if restart == 0 {
+        x0.to_vec()
+    } else {
+        let mut seed = 0xDEADBEEF_CAFEBABE + restart as u64;
+        let mut rx = x0.to_vec();
+        for i in 0..n {
+            let (lo, hi) = bounds[i];
+            let noise = (hi - lo) * 0.3 * (rand_f64(&mut seed) - 0.5);
+            rx[i] = (rx[i] + noise).clamp(lo, hi);
+        }
+        rx
+    };
+
+    // Build initial simplex with larger step size for better exploration
+    let mut simplex: Vec<Vec<f64>> = Vec::with_capacity(n + 1);
+    simplex.push(start_x);
+    for i in 0..n {
+        let mut xi = simplex[0].clone();
+        let (lo, hi) = bounds[i];
+        let range = hi - lo;
+        // Use 30% of range for initial simplex (was 25%)
+        let step = range * 0.30;
+        xi[i] = (xi[i] + step).clamp(lo, hi);
+        if (xi[i] - simplex[0][i]).abs() < 1e-10 {
+            xi[i] = (xi[i] - step * 2.0).clamp(lo, hi);
+        }
+        simplex.push(xi);
+    }
+
+    let eval_fn = |params: &[f64]| -> f64 {
+        let n_fr = ctx.n;
+        let ln10 = ctx.ln10;
+        let mut fr = vec![0.0; n_fr];
+        let mut penalty_acc = 0.0;
+
+        let mut idx = 0;
+        for spec in &ctx.filter_specs {
+            let fc = if spec.optimize_fc {
+                let v = 10.0_f64.powf(params[idx]).clamp(spec.min_fc, spec.max_fc);
+                idx += 1;
+                v
+            } else { spec.fixed_fc };
+            let q = if spec.optimize_q {
+                let v = params[idx].clamp(spec.min_q, spec.max_q);
+                idx += 1;
+                v
+            } else { spec.fixed_q };
+            let gain = if spec.optimize_gain {
+                let v = params[idx].clamp(spec.min_gain, spec.max_gain);
+                idx += 1;
+                v
+            } else { spec.fixed_gain };
+
+            let (_, a1, a2, b0, b1, b2) = biquad_coeffs_direct(spec.filter_type, fc, q, gain, ctx.fs);
+
+            let a1n = -a1;
+            let a2n = -a2;
+            let sum_b = b0 + b1 + b2;
+            let sum_a = 1.0 + a1n + a2n;
+            let num_base = sum_b * sum_b;
+            let den_base = sum_a * sum_a;
+
+            let sigmoid = if matches!(spec.filter_type, FilterType::Peaking) {
+                let gain_limit = -0.09503189270199464 + 20.575128011847003 * (1.0 / q);
+                let x_val = gain / gain_limit - 1.0;
+                1.0 / (1.0 + (-x_val * 100.0).exp())
+            } else { 0.0 };
+
+            for i in 0..n_fr {
+                let phi = ctx.phi[i];
+                let num = num_base + (b0 * b2 * phi - (b1 * (b0 + b2) + 4.0 * b0 * b2)) * phi;
+                let den = den_base + (a2n * phi - (a1n * (1.0 + a2n) + 4.0 * a2n)) * phi;
+                let db = 10.0 * num.max(1e-30).ln() / ln10 - 10.0 * den.max(1e-30).ln() / ln10;
+                fr[i] += db;
+                penalty_acc += db * db * sigmoid;
+            }
+        }
+        let penalty = penalty_acc / n_fr as f64;
+
+        let ix10k = ctx.ix10k;
+        let fr_mean_10k = if ix10k < n_fr {
+            fr[ix10k..].iter().sum::<f64>() / (n_fr - ix10k) as f64
+        } else { 0.0 };
+        let target_mean = ctx.target_mean_10k;
+
+        let lo = ctx.min_f_ix;
+        let hi = ctx.max_f_ix.min(n_fr);
+        let mut mse = 0.0;
+        for i in lo..ix10k.min(hi) {
+            let diff = ctx.target[i] - fr[i];
+            mse += diff * diff;
+        }
+        for _i in ix10k.max(lo)..hi {
+            let diff = target_mean - fr_mean_10k;
+            mse += diff * diff;
+        }
+        mse /= (hi - lo) as f64;
+
+        (mse + penalty).max(0.0).sqrt()
+    };
+
+    let mut simplex_loss: Vec<f64> = simplex.iter().map(|x| eval_fn(x)).collect();
+
+    // Increase max iterations for better convergence (Python uses time-based stopping)
+    let max_iters = 8000;
+    // Nelder-Mead parameters (tuned for high-dimensional problems)
+    let nm_alpha = 1.0;   // reflection coefficient
+    let nm_gamma = 2.2;   // expansion coefficient (slightly more aggressive)
+    let nm_rho = 0.35;    // contraction coefficient (more conservative)
+    let nm_sigma = 0.35;  // shrink coefficient (more conservative)
+    // Perturbation parameters for escaping local optima
+    let perturb_threshold = 1000;  // iterations before perturbation
+    let perturb_magnitude = 0.1;   // perturbation size (fraction of range)
+
+    // Track loss history for early stopping (matching Python behavior)
+    let mut loss_history: Vec<f64> = Vec::new();
+    let window_size = 30;
+    let mut best_loss_ever = f64::MAX;
+    let mut best_loss_count = 0;
+
+    for iter in 0..max_iters {
+        let mut order: Vec<usize> = (0..simplex.len()).collect();
+        order.sort_by(|&a, &b| simplex_loss[a].partial_cmp(&simplex_loss[b]).unwrap());
+
+        let best = order[0];
+        let worst = order[n];
+        let second_worst = order[n - 1];
+
+        let mean_loss = simplex_loss.iter().sum::<f64>() / simplex_loss.len() as f64;
+        let std_loss = (simplex_loss.iter()
+            .map(|l| (l - mean_loss).powi(2))
+            .sum::<f64>() / simplex_loss.len() as f64).sqrt();
+
+        // Track best loss for early stopping
+        let current_best = simplex_loss[order[0]];
+        loss_history.push(current_best);
+
+        // Track if we're still improving
+        if current_best < best_loss_ever - 1e-8 {
+            best_loss_ever = current_best;
+            best_loss_count = 0;
+        } else {
+            best_loss_count += 1;
+        }
+
+        // Early stopping conditions (matching Python behavior)
+        if std_loss < 1e-7 {
+            break;
+        }
+
+        // Check if loss has plateaued (similar to Python's min_change_rate)
+        if loss_history.len() >= window_size {
+            let recent = &loss_history[loss_history.len() - window_size..];
+            let old_mean: f64 = recent[..window_size/2].iter().sum::<f64>() / (window_size/2) as f64;
+            let new_mean: f64 = recent[window_size/2..].iter().sum::<f64>() / (window_size/2) as f64;
+            let change_rate = (old_mean - new_mean) / old_mean.abs().max(1e-10);
+
+            // Stop if improvement is less than 0.05% over window
+            if change_rate.abs() < 0.0005 && iter > 200 {
+                break;
+            }
+        }
+
+        // Perturbation mechanism to escape local optima
+        if best_loss_count > perturb_threshold && iter > 300 {
+            // Perturb the worst vertices
+            for &idx in &order[1..] {
+                for i in 0..n {
+                    let (lo, hi) = bounds[i];
+                    let range = hi - lo;
+                    let perturbation = (range * perturb_magnitude) * (rand_f64(&mut (0xDEADBEEF + iter as u64 + i as u64)) - 0.5);
+                    simplex[idx][i] = (simplex[idx][i] + perturbation).clamp(lo, hi);
+                }
+                simplex_loss[idx] = eval_fn(&simplex[idx]);
+            }
+            best_loss_count = 0;  // Reset counter
+        }
+
+        // Stop if no improvement for many iterations
+        if best_loss_count > 2000 && iter > 500 {
+            break;
+        }
+
+        // Check if we've reached a very good loss
+        if current_best < 0.0005 {
+            break;
+        }
+
+        let mut centroid = vec![0.0; n];
+        for &idx in &order[..n] {
+            for i in 0..n {
+                centroid[i] += simplex[idx][i];
+            }
+        }
+        for i in 0..n {
+            centroid[i] /= n as f64;
+        }
+
+        let mut reflected = centroid.clone();
+        for i in 0..n {
+            reflected[i] = centroid[i] + nm_alpha * (centroid[i] - simplex[worst][i]);
+        }
+        for i in 0..n {
+            let (lo, hi) = bounds[i];
+            reflected[i] = reflected[i].clamp(lo, hi);
+        }
+        let reflected_loss = eval_fn(&reflected);
+
+        if reflected_loss < simplex_loss[second_worst] && reflected_loss >= simplex_loss[best] {
+            simplex[worst] = reflected;
+            simplex_loss[worst] = reflected_loss;
+        } else if reflected_loss < simplex_loss[best] {
+            let mut expanded = centroid.clone();
+            for i in 0..n {
+                expanded[i] = centroid[i] + nm_gamma * (reflected[i] - centroid[i]);
+            }
+            for i in 0..n {
+                let (lo, hi) = bounds[i];
+                expanded[i] = expanded[i].clamp(lo, hi);
+            }
+            let expanded_loss = eval_fn(&expanded);
+
+            if expanded_loss < reflected_loss {
+                simplex[worst] = expanded;
+                simplex_loss[worst] = expanded_loss;
+            } else {
+                simplex[worst] = reflected;
+                simplex_loss[worst] = reflected_loss;
+            }
+        } else {
+            let mut contracted = centroid.clone();
+            for i in 0..n {
+                contracted[i] = centroid[i] + nm_rho * (simplex[worst][i] - centroid[i]);
+            }
+            for i in 0..n {
+                let (lo, hi) = bounds[i];
+                contracted[i] = contracted[i].clamp(lo, hi);
+            }
+            let contracted_loss = eval_fn(&contracted);
+
+            if contracted_loss < simplex_loss[worst] {
+                simplex[worst] = contracted;
+                simplex_loss[worst] = contracted_loss;
+            } else {
+                for &idx in &order[1..] {
+                    for i in 0..n {
+                        simplex[idx][i] = simplex[best][i] + nm_sigma * (simplex[idx][i] - simplex[best][i]);
+                    }
+                    for i in 0..n {
+                        let (lo, hi) = bounds[i];
+                        simplex[idx][i] = simplex[idx][i].clamp(lo, hi);
+                    }
+                    simplex_loss[idx] = eval_fn(&simplex[idx]);
+                }
+            }
+        }
+    }
+
+    let mut best_idx = 0;
+    let mut restart_best_loss = f64::MAX;
+    for (i, &loss) in simplex_loss.iter().enumerate() {
+        if loss < restart_best_loss {
+            restart_best_loss = loss;
+            best_idx = i;
+        }
+    }
+
+    (restart_best_loss, simplex[best_idx].clone())
+}
+
+/// Simple xorshift random number in [0, 1). Free function usable outside PEQ.
+fn rand_f64(seed: &mut u64) -> f64 {
+    let mut x = *seed;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    if x == 0 { x = 1; }
+    *seed = x;
+    (x as f64) / (u64::MAX as f64)
 }
 
 /// Result of PEQ optimization
@@ -1116,7 +1340,6 @@ mod tests {
         );
         let fr = filter.frequency_response();
         assert!(fr.len() == 3);
-        // At fc, gain should be close to 3 dB
         assert!((fr[1] - 3.0).abs() < 0.5, "fr[1] = {}", fr[1]);
     }
 
@@ -1129,7 +1352,6 @@ mod tests {
             false, false, false,
         );
         let fr = filter.frequency_response();
-        // At low frequencies, gain should be positive
         assert!(fr[0] > 0.0, "fr[0] = {}", fr[0]);
     }
 
@@ -1142,7 +1364,6 @@ mod tests {
             false, false, false,
         );
         let fr = filter.frequency_response();
-        // At high frequencies, gain should be positive
         assert!(fr[2] > 0.0, "fr[2] = {}", fr[2]);
     }
 
@@ -1153,5 +1374,71 @@ mod tests {
         let target = vec![0.0; f.len()];
         let peq = PEQ::from_config(config, f, 44100.0, target).unwrap();
         assert_eq!(peq.filters.len(), 10); // 1 low + 1 high + 8 peaking
+    }
+
+    #[test]
+    fn test_direct_biquad_vs_trait() {
+        // Verify that the direct biquad computation matches the trait method
+        let fs = 44100.0;
+        let fc = 1000.0;
+        let q = 1.5;
+        let gain = 3.0;
+
+        let f = vec![100.0, 500.0, 1000.0, 5000.0, 10000.0];
+
+        // Peaking
+        let filter = PeakingFilter::new(
+            f.clone(), fs, Some(fc), Some(q), Some(gain),
+            20.0, 10000.0, 0.1, 6.0, -20.0, 20.0,
+            false, false, false,
+        );
+        let fr_trait = filter.frequency_response();
+        let (_, a1, a2, b0, b1, b2) = biquad_coeffs_direct(FilterType::Peaking, fc, q, gain, fs);
+        let fr_direct = compute_fr_direct(&f, fs, a1, a2, b0, b1, b2);
+        for i in 0..f.len() {
+            assert!((fr_trait[i] - fr_direct[i]).abs() < 1e-10,
+                "Peaking f={}: trait={} direct={}", f[i], fr_trait[i], fr_direct[i]);
+        }
+
+        // LowShelf
+        let filter = LowShelfFilter::new(
+            f.clone(), fs, Some(fc), Some(0.7), Some(gain),
+            20.0, 10000.0, 0.4, 0.7, -20.0, 20.0,
+            false, false, false,
+        );
+        let fr_trait = filter.frequency_response();
+        let (_, a1, a2, b0, b1, b2) = biquad_coeffs_direct(FilterType::LowShelf, fc, 0.7, gain, fs);
+        let fr_direct = compute_fr_direct(&f, fs, a1, a2, b0, b1, b2);
+        for i in 0..f.len() {
+            assert!((fr_trait[i] - fr_direct[i]).abs() < 1e-10,
+                "LowShelf f={}: trait={} direct={}", f[i], fr_trait[i], fr_direct[i]);
+        }
+
+        // HighShelf
+        let filter = HighShelfFilter::new(
+            f.clone(), fs, Some(fc), Some(0.7), Some(gain),
+            20.0, 10000.0, 0.4, 0.7, -20.0, 20.0,
+            false, false, false,
+        );
+        let fr_trait = filter.frequency_response();
+        let (_, a1, a2, b0, b1, b2) = biquad_coeffs_direct(FilterType::HighShelf, fc, 0.7, gain, fs);
+        let fr_direct = compute_fr_direct(&f, fs, a1, a2, b0, b1, b2);
+        for i in 0..f.len() {
+            assert!((fr_trait[i] - fr_direct[i]).abs() < 1e-10,
+                "HighShelf f={}: trait={} direct={}", f[i], fr_trait[i], fr_direct[i]);
+        }
+    }
+
+    /// Helper: compute FR from coefficients using same phi formula
+    fn compute_fr_direct(f: &[f64], fs: f64, a1: f64, a2: f64, b0: f64, b1: f64, b2: f64) -> Vec<f64> {
+        let a1n = -a1;
+        let a2n = -a2;
+        f.iter().map(|&fi| {
+            let w = 2.0 * std::f64::consts::PI * fi / fs;
+            let phi = 4.0 * (w / 2.0).sin().powi(2);
+            let num = (b0 + b1 + b2).powi(2) + (b0 * b2 * phi - (b1 * (b0 + b2) + 4.0 * b0 * b2)) * phi;
+            let den = (1.0 + a1n + a2n).powi(2) + (a2n * phi - (a1n * (1.0 + a2n) + 4.0 * a2n)) * phi;
+            10.0 * num.max(1e-30).log10() - 10.0 * den.max(1e-30).log10()
+        }).collect()
     }
 }

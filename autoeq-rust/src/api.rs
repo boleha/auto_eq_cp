@@ -37,7 +37,7 @@ impl Default for ProcessParams {
 }
 
 /// Result of equalize_data
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct EqualizeResult {
     pub name: String,
     pub frequency: Vec<f64>,
