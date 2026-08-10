@@ -1063,6 +1063,7 @@ fn run_one_restart(
         let ln10 = ctx.ln10;
         let mut fr = vec![0.0; n_fr];
         let mut penalty_acc = 0.0;
+        let mut fcs: Vec<f64> = Vec::with_capacity(ctx.filter_specs.len());
 
         let mut idx = 0;
         for spec in &ctx.filter_specs {
@@ -1082,6 +1083,8 @@ fn run_one_restart(
                 v
             } else { spec.fixed_gain };
 
+            fcs.push(fc);
+
             let (_, a1, a2, b0, b1, b2) = biquad_coeffs_direct(spec.filter_type, fc, q, gain, ctx.fs);
 
             let a1n = -a1;
@@ -1091,6 +1094,11 @@ fn run_one_restart(
             let num_base = sum_b * sum_b;
             let den_base = sum_a * sum_a;
 
+            // 循环不变量提到外面(保持与原代码相同的乘法/加法顺序 → bit-exact)
+            let b0b2 = b0 * b2;
+            let c_num = b1 * (b0 + b2) + 4.0 * b0b2;
+            let c_den = a1n * (1.0 + a2n) + 4.0 * a2n;
+
             let sigmoid = if matches!(spec.filter_type, FilterType::Peaking) {
                 let gain_limit = -0.09503189270199464 + 20.575128011847003 * (1.0 / q);
                 let x_val = gain / gain_limit - 1.0;
@@ -1099,14 +1107,29 @@ fn run_one_restart(
 
             for i in 0..n_fr {
                 let phi = ctx.phi[i];
-                let num = num_base + (b0 * b2 * phi - (b1 * (b0 + b2) + 4.0 * b0 * b2)) * phi;
-                let den = den_base + (a2n * phi - (a1n * (1.0 + a2n) + 4.0 * a2n)) * phi;
+                let num = num_base + (b0b2 * phi - c_num) * phi;
+                let den = den_base + (a2n * phi - c_den) * phi;
                 let db = 10.0 * num.max(1e-30).ln() / ln10 - 10.0 * den.max(1e-30).ln() / ln10;
                 fr[i] += db;
                 penalty_acc += db * db * sigmoid;
             }
         }
         let penalty = penalty_acc / n_fr as f64;
+
+        // Filter spacing penalty: discourage multiple peaking filters piling at nearly the same fc.
+        // (Reference tool result uses well-separated fc; stacked filters create over-shoot valleys.)
+        let mut spacing_penalty = 0.0;
+        if fcs.len() > 1 {
+            let mut sorted = fcs.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            for w in sorted.windows(2) {
+                let ratio = w[1] / w[0].max(1.0);
+                if ratio < 1.4 {
+                    spacing_penalty += (1.4 - ratio) * (1.4 - ratio) * 0.5;
+                }
+            }
+        }
+        let penalty = penalty + spacing_penalty;
 
         let ix10k = ctx.ix10k;
         let fr_mean_10k = if ix10k < n_fr {
@@ -1133,15 +1156,15 @@ fn run_one_restart(
     let mut simplex_loss: Vec<f64> = simplex.iter().map(|x| eval_fn(x)).collect();
 
     // Increase max iterations for better convergence (Python uses time-based stopping)
-    let max_iters = 8000;
+    let max_iters = 80000;
     // Nelder-Mead parameters (tuned for high-dimensional problems)
     let nm_alpha = 1.0;   // reflection coefficient
     let nm_gamma = 2.2;   // expansion coefficient (slightly more aggressive)
     let nm_rho = 0.35;    // contraction coefficient (more conservative)
     let nm_sigma = 0.35;  // shrink coefficient (more conservative)
     // Perturbation parameters for escaping local optima
-    let perturb_threshold = 1000;  // iterations before perturbation
-    let perturb_magnitude = 0.1;   // perturbation size (fraction of range)
+    let perturb_threshold = 300;  // iterations before perturbation
+    let perturb_magnitude = 0.25; // perturbation size (fraction of range)
 
     // Track loss history for early stopping (matching Python behavior)
     let mut loss_history: Vec<f64> = Vec::new();
@@ -1186,8 +1209,8 @@ fn run_one_restart(
             let new_mean: f64 = recent[window_size/2..].iter().sum::<f64>() / (window_size/2) as f64;
             let change_rate = (old_mean - new_mean) / old_mean.abs().max(1e-10);
 
-            // Stop if improvement is less than 0.05% over window
-            if change_rate.abs() < 0.0005 && iter > 200 {
+            // Stop only if improvement is less than 0.005% over window AND optimizer has run long enough
+            if change_rate.abs() < 0.00005 && iter > 3000 {
                 break;
             }
         }
@@ -1208,12 +1231,12 @@ fn run_one_restart(
         }
 
         // Stop if no improvement for many iterations
-        if best_loss_count > 2000 && iter > 500 {
+        if best_loss_count > 25000 && iter > 1000 {
             break;
         }
 
         // Check if we've reached a very good loss
-        if current_best < 0.0005 {
+        if current_best < 0.0001 {
             break;
         }
 
@@ -1311,13 +1334,13 @@ fn rand_f64(seed: &mut u64) -> f64 {
 }
 
 /// Result of PEQ optimization
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PeqResult {
     pub preamp: f64,
     pub filters: Vec<FilterResult>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FilterResult {
     #[serde(rename = "type")]
     pub filter_type: FilterType,

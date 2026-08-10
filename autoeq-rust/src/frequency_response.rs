@@ -215,6 +215,7 @@ impl FrequencyResponse {
         treble_boost_q: f64,
         tilt: f64,
         fs: f64,
+        min_mean_error: bool,
     ) {
         // Prepare target: interpolate and center
         let mut target_fr = target.clone();
@@ -237,6 +238,30 @@ impl FrequencyResponse {
 
         // Compute error
         self.error = self.raw.iter().zip(self.target.iter()).map(|(r, t)| r - t).collect();
+
+        // min_mean_error: 平移到 100Hz-10kHz 范围内误差均值为零
+        // 参考 Python frequency_response.py:480-484
+        // 让所有滤波器以 1kHz 对齐，避免低频/高频偏差拉高 preamp、削峰
+        if min_mean_error {
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for i in 0..self.frequency.len() {
+                let f = self.frequency[i];
+                if f >= 100.0 && f <= 10000.0 && i < self.error.len() {
+                    sum += self.error[i];
+                    count += 1;
+                }
+            }
+            if count > 0 {
+                let delta = sum / count as f64;
+                for v in &mut self.error {
+                    *v -= delta;
+                }
+                for v in &mut self.target {
+                    *v += delta;
+                }
+            }
+        }
     }
 
     /// Apply Savitzky-Golay smoothing with sigmoid blending between normal and treble windows.
@@ -355,6 +380,7 @@ impl FrequencyResponse {
     }
 
     /// Full processing pipeline: interpolate -> center -> compensate -> smoothen -> equalize
+    #[allow(clippy::too_many_arguments)]
     pub fn process(
         &mut self,
         target: &FrequencyResponse,
@@ -374,11 +400,13 @@ impl FrequencyResponse {
         treble_f_lower: f64,
         treble_f_upper: f64,
         treble_gain_k: f64,
+        min_mean_error: bool,
     ) -> EqualizeResult {
         let _ = self.interpolate(None, DEFAULT_STEP, DEFAULT_F_MIN, DEFAULT_F_MAX);
         let _ = self.center(1000.0);
         self.compensate(target, bass_boost_gain, bass_boost_fc, bass_boost_q,
-                       treble_boost_gain, treble_boost_fc, treble_boost_q, tilt, fs);
+                       treble_boost_gain, treble_boost_fc, treble_boost_q, tilt, fs,
+                       min_mean_error);
         self.smoothen(window_size, treble_window_size, treble_f_lower, treble_f_upper);
         self.equalize(max_gain, max_slope, 0.0, concha_interference,
                      window_size, treble_window_size, treble_f_lower, treble_f_upper, treble_gain_k)
@@ -848,7 +876,7 @@ mod tests {
         fr.center(1000.0);
 
         let target = FrequencyResponse::new("flat", fr.frequency.clone(), vec![0.0; fr.frequency.len()]).unwrap();
-        fr.compensate(&target, 0.0, 105.0, 0.7, 0.0, 10000.0, 0.7, 0.0, 44100.0);
+        fr.compensate(&target, 0.0, 105.0, 0.7, 0.0, 10000.0, 0.7, 0.0, 44100.0, false);
 
         // Debug compensate step by step
         let mut target_fr = target.clone();
@@ -934,7 +962,7 @@ mod tests {
 
         // Check equalization (tolerance: 1.0 dB - accumulated differences)
         let target = FrequencyResponse::new("flat", fr.frequency.clone(), vec![0.0; fr.frequency.len()]).unwrap();
-        fr.compensate(&target, 0.0, 105.0, 0.7, 0.0, 10000.0, 0.7, 0.0, 44100.0);
+        fr.compensate(&target, 0.0, 105.0, 0.7, 0.0, 10000.0, 0.7, 0.0, 44100.0, false);
         fr.equalize(6.0, 18.0, 0.0, false,
                    DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
                    DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER, 1.0);

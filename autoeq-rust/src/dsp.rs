@@ -235,45 +235,75 @@ pub fn find_dips(data: &[f64]) -> Vec<usize> {
 
 fn compute_prominences(data: &[f64], peak_inds: &[usize], peak_heights: &[f64]) -> Vec<f64> {
     let n_peaks = peak_inds.len();
+    if n_peaks == 0 {
+        return Vec::new();
+    }
+
+    // O(N) 单调栈: 找每个 peak 左侧/右侧最近且严格更高的 peak
+    // (等高不算更高, 与原代码 peak_heights[k] > peak_h 严格大于保持一致)
+    let left_higher = first_higher_left(peak_heights);
+    let right_higher = first_higher_right(peak_heights);
+
     let mut prominences = vec![0.0; n_peaks];
-
     for i in 0..n_peaks {
-        let peak_pos = peak_inds[i];
-        let peak_h = peak_heights[i];
+        let pos = peak_inds[i];
+        let h = peak_heights[i];
 
-        // Walk left to find the minimum value between this peak and the first higher peak to the left
-        let mut left_min = peak_h;
-        let mut found_higher_left = false;
-        for j in (0..peak_pos).rev() {
-            left_min = left_min.min(data[j]);
-            for k in 0..n_peaks {
-                if peak_inds[k] < peak_pos && peak_inds[k] >= j && peak_heights[k] > peak_h {
-                    found_higher_left = true;
-                    break;
-                }
-            }
-            if found_higher_left { break; }
-        }
+        // 左侧: 扫描 [left_higher[i] 的 data 位置, pos] 区间 (含 higher peak 位置处, 与原代码一致)
+        let left_lo = if left_higher[i] == usize::MAX { 0 } else { peak_inds[left_higher[i]] };
+        let left_min = data[left_lo..=pos].iter().fold(h, |m, &v| m.min(v));
 
-        // Walk right
-        let mut right_min = peak_h;
-        let mut found_higher_right = false;
-        for j in (peak_pos + 1)..data.len() {
-            right_min = right_min.min(data[j]);
-            for k in 0..n_peaks {
-                if peak_inds[k] > peak_pos && peak_inds[k] <= j && peak_heights[k] > peak_h {
-                    found_higher_right = true;
-                    break;
-                }
-            }
-            if found_higher_right { break; }
-        }
+        // 右侧: 扫描 [pos, right_higher[i] 的 data 位置] 区间 (含 higher peak 位置处)
+        let right_hi = if right_higher[i] == usize::MAX { data.len() - 1 } else { peak_inds[right_higher[i]] };
+        let right_min = data[pos..=right_hi].iter().fold(h, |m, &v| m.min(v));
 
         let key_col = left_min.max(right_min);
-        prominences[i] = (peak_h - key_col).max(0.0);
+        prominences[i] = (h - key_col).max(0.0);
     }
 
     prominences
+}
+
+/// 经典单调栈: 每个 peak 左侧最近且严格更高的 peak 索引, 无则为 usize::MAX
+fn first_higher_left(heights: &[f64]) -> Vec<usize> {
+    let n = heights.len();
+    let mut result = vec![usize::MAX; n];
+    let mut stack: Vec<usize> = Vec::with_capacity(n);
+    for i in 0..n {
+        while let Some(&top) = stack.last() {
+            if heights[top] <= heights[i] {
+                stack.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some(&top) = stack.last() {
+            result[i] = top;
+        }
+        stack.push(i);
+    }
+    result
+}
+
+/// 经典单调栈: 每个 peak 右侧最近且严格更高的 peak 索引
+fn first_higher_right(heights: &[f64]) -> Vec<usize> {
+    let n = heights.len();
+    let mut result = vec![usize::MAX; n];
+    let mut stack: Vec<usize> = Vec::with_capacity(n);
+    for i in (0..n).rev() {
+        while let Some(&top) = stack.last() {
+            if heights[top] <= heights[i] {
+                stack.pop();
+            } else {
+                break;
+            }
+        }
+        if let Some(&top) = stack.last() {
+            result[i] = top;
+        }
+        stack.push(i);
+    }
+    result
 }
 
 fn compute_widths(data: &[f64], peak_inds: &[usize], peak_heights: &[f64], prominences: &[f64]) -> Vec<f64> {

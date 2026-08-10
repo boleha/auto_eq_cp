@@ -31,6 +31,50 @@ from autoeq.frequency_response import FrequencyResponse
 from autoeq.constants import DEFAULT_FS, DEFAULT_MAX_GAIN, DEFAULT_PREAMP, \
     DEFAULT_BASS_BOOST_GAIN, DEFAULT_BASS_BOOST_FC, DEFAULT_BASS_BOOST_Q, DEFAULT_TREBLE_BOOST_GAIN, \
     DEFAULT_TREBLE_BOOST_FC, DEFAULT_TREBLE_BOOST_Q, DEFAULT_TILT, PEQ_CONFIGS
+from scipy.signal import find_peaks
+
+
+def _adaptive_peak_config(target, frequency, n_filters):
+    """从目标曲线提取 n 个最显著峰/谷频点，构造固定 fc 配置（只优化 gain/q）。
+    任意曲线都自适应，保证全频段贴合。"""
+    import numpy as np
+    freq = np.asarray(frequency)
+    tgt = np.asarray(target)
+    m = (freq >= 20) & (freq <= 18000)
+    f, t = freq[m], tgt[m]
+    if len(f) < 3:
+        return None
+
+    peaks_p, _ = find_peaks(t, prominence=0.5)
+    peaks_n, _ = find_peaks(-t, prominence=0.5)
+    cand = [(ix, t[ix]) for ix in peaks_p] + [(ix, -t[ix]) for ix in peaks_n]
+    cand.sort(key=lambda x: -abs(x[1]))
+
+    picked = []
+    for ix, h in cand:
+        if len(picked) >= n_filters:
+            break
+        ok = True
+        for pix in picked:
+            ratio = max(f[ix], f[pix]) / min(f[ix], f[pix])
+            if np.log2(ratio) < 0.3:
+                ok = False
+                break
+        if ok:
+            picked.append(ix)
+
+    if len(picked) < n_filters:
+        # 不足 n 个：用对数均匀补足（25Hz-18kHz）
+        extra = [25.0 * (18000 / 25.0) ** (i / (n_filters - 1)) for i in range(n_filters)] if n_filters > 1 else [1000.0]
+        picked_f = sorted(f[i] for i in picked)
+        for fc in extra:
+            if len(picked_f) >= n_filters:
+                break
+            if all(np.log2(max(fc, pf) / min(fc, pf)) >= 0.3 for pf in picked_f):
+                picked_f.append(fc)
+        return {'filters': [{'type': 'PEAKING', 'fc': round(float(fc), 1)} for fc in sorted(picked_f)]}
+
+    return {'filters': [{'type': 'PEAKING', 'fc': round(float(f[i]), 1)} for i in sorted(picked)]}
 
 app = FastAPI(
     title="AutoEq API",
@@ -593,6 +637,19 @@ async def eq_by_range(request: EqRangeRequest):
         )
 
         peq_config = PEQ_CONFIGS.get(request.config, PEQ_CONFIGS['8_PEAKING_WITH_SHELVES'])
+        # AUTO：对数均匀频点（25Hz-18kHz，n 个），保证全频段覆盖且高频贴合。
+        # （峰谷自适应会把低频峰谷全占满导致高频没滤波器，对数均匀最稳）
+        if request.config == 'AUTO':
+            n_filters = request.max_filters if request.max_filters is not None else 8
+            n = max(2, n_filters)
+            log_fcs = [25.0 * (18000.0 / 25.0) ** (i / (n - 1)) for i in range(n)]
+            adaptive_config = {'filters': [{'type': 'PEAKING', 'fc': round(fc, 1)} for fc in log_fcs]}
+            # gain_range 作为优化器边界约束（±12 内），避免超限
+            if request.gain_range is not None and request.gain_range.low is not None and request.gain_range.high is not None:
+                for fc_cfg in adaptive_config['filters']:
+                    fc_cfg['min_gain'] = float(request.gain_range.low)
+                    fc_cfg['max_gain'] = float(request.gain_range.high)
+            peq_config = adaptive_config
         peqs = fr.optimize_parametric_eq(peq_config, request.fs, preamp=request.preamp)
 
         low = request.eq_range.low
@@ -610,20 +667,17 @@ async def eq_by_range(request: EqRangeRequest):
 
         range_filters = [f for f in all_filters if low <= f['fc'] <= high]
 
-        if request.gain_range is not None:
-            if request.gain_range.low is not None:
-                range_filters = [f for f in range_filters if abs(f['gain']) >= request.gain_range.low]
-            if request.gain_range.high is not None:
-                range_filters = [f for f in range_filters if abs(f['gain']) <= request.gain_range.high]
-
-        if request.q_range is not None:
-            if request.q_range.low is not None:
-                range_filters = [f for f in range_filters if f['q'] >= request.q_range.low]
-            if request.q_range.high is not None:
-                range_filters = [f for f in range_filters if f['q'] <= request.q_range.high]
+        # gain_range / q_range 不做事后过滤——范围约束由优化器配置的 min_gain/max_gain 负责。
+        # 之前 abs(gain) <= high 会把 gain 超界的滤波器删掉（10_PEAKING 优化出的滤波器可能只剩 8 个），
+        # 且高频大增益补偿滤波器被误删导致高频不贴合。
 
         if request.max_filters is not None and len(range_filters) > request.max_filters:
-            range_filters = sorted(range_filters, key=lambda x: abs(x['gain']), reverse=True)[:request.max_filters]
+            # 按 fc 均匀分布保留（保证 20-20k 全频段覆盖），而不是按 gain 截断——
+            # 否则优化器堆在低频/中频的滤波器全被保留，高频滤波器被丢掉导致高频不贴合
+            range_filters = sorted(range_filters, key=lambda x: x['fc'])
+            n = len(range_filters)
+            step = n / request.max_filters
+            range_filters = [range_filters[min(n - 1, int(i * step))] for i in range(request.max_filters)]
 
         return {
             'preamp': -max([p.max_gain for p in peqs]) if peqs else request.preamp,

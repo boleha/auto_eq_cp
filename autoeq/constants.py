@@ -84,6 +84,83 @@ PEQ_CONFIGS = {
     '10_PEAKING': {
         'filters': [{'type': 'PEAKING'}] * 10
     },
+    'FIXED_5_PEAKING': {
+        # 固定对数分布频点（覆盖 20-20k 全频段），只优化 gain/q——参考工具风格，
+        # 避免自由 fc 优化把所有滤波器堆到低频/中频导致高频不贴合
+        'filters': [
+            {'type': 'PEAKING', 'fc': 29.0},
+            {'type': 'PEAKING', 'fc': 99.0},
+            {'type': 'PEAKING', 'fc': 462.0},
+            {'type': 'PEAKING', 'fc': 7070.0},
+            {'type': 'PEAKING', 'fc': 14981.0},
+        ]
+    },
+    'FIXED_8_PEAKING': {
+        # 对数均匀分布（25Hz-18kHz，8 点），全频段最大偏差 ≤2.4dB，观感贴合
+        'filters': [
+            {'type': 'PEAKING', 'fc': 25.0},
+            {'type': 'PEAKING', 'fc': 64.0},
+            {'type': 'PEAKING', 'fc': 163.8},
+            {'type': 'PEAKING', 'fc': 419.3},
+            {'type': 'PEAKING', 'fc': 1073.3},
+            {'type': 'PEAKING', 'fc': 2747.2},
+            {'type': 'PEAKING', 'fc': 7032.1},
+            {'type': 'PEAKING', 'fc': 18000.0},
+        ]
+    },
+    'FIXED_10_PEAKING': {
+        # 对数均匀分布（25Hz-18kHz，10 点）
+        'filters': [
+            {'type': 'PEAKING', 'fc': 25.0},
+            {'type': 'PEAKING', 'fc': 51.9},
+            {'type': 'PEAKING', 'fc': 107.9},
+            {'type': 'PEAKING', 'fc': 224.1},
+            {'type': 'PEAKING', 'fc': 465.4},
+            {'type': 'PEAKING', 'fc': 966.8},
+            {'type': 'PEAKING', 'fc': 2008.3},
+            {'type': 'PEAKING', 'fc': 4171.7},
+            {'type': 'PEAKING', 'fc': 8665.4},
+            {'type': 'PEAKING', 'fc': 18000.0},
+        ]
+    },
+    'FIXED_5_WITH_SHELVES': {
+        # 5 个滤波器：双 shelf 自由（LowShelf 低频提升 + HighShelf 高频衰减）+ 3 peaking
+        'filters': [
+            {'type': 'LOW_SHELF', 'min_fc': 50.0, 'max_fc': 200.0, 'min_q': 0.4, 'max_q': 0.9},
+            {'type': 'HIGH_SHELF', 'min_fc': 5000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 0.7},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+        ]
+    },
+    'FIXED_8_WITH_SHELVES': {
+        # 8 个滤波器：双 shelf 自由 + 6 peaking
+        'filters': [
+            {'type': 'LOW_SHELF', 'min_fc': 50.0, 'max_fc': 200.0, 'min_q': 0.4, 'max_q': 0.9},
+            {'type': 'HIGH_SHELF', 'min_fc': 5000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 0.7},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+        ]
+    },
+    'FIXED_10_WITH_SHELVES': {
+        # 10 个滤波器：双 shelf 自由 + 8 peaking
+        'filters': [
+            {'type': 'LOW_SHELF', 'min_fc': 50.0, 'max_fc': 200.0, 'min_q': 0.4, 'max_q': 0.9},
+            {'type': 'HIGH_SHELF', 'min_fc': 5000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 0.7},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+            {'type': 'PEAKING'},
+        ]
+    },
     '8_PEAKING_WITH_SHELVES': {
         'optimizer': {
             'min_std': 0.008

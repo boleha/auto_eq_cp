@@ -18,6 +18,22 @@ struct EqRangeInput {
     max_filters: Option<usize>,
     gain_range: Option<FfiRange>,
     q_range: Option<FfiRange>,
+    // 平滑度控制参数 —— 对齐 Python 原生 AutoEq 接口
+    window_size: Option<f64>,
+    treble_window_size: Option<f64>,
+    treble_f_lower: Option<f64>,
+    treble_f_upper: Option<f64>,
+    treble_gain_k: Option<f64>,
+    max_gain: Option<f64>,
+    max_slope: Option<f64>,
+    tilt: Option<f64>,
+    bass_boost_gain: Option<f64>,
+    bass_boost_fc: Option<f64>,
+    bass_boost_q: Option<f64>,
+    treble_boost_gain: Option<f64>,
+    treble_boost_fc: Option<f64>,
+    treble_boost_q: Option<f64>,
+    min_mean_error: Option<bool>,
 }
 
 #[derive(serde::Deserialize)]
@@ -115,6 +131,13 @@ impl FfiParams {
             fs: self.fs.unwrap_or(default.fs),
             max_gain: self.max_gain.unwrap_or(default.max_gain),
             preamp: self.preamp.unwrap_or(default.preamp),
+            window_size: default.window_size,
+            treble_window_size: default.treble_window_size,
+            treble_f_lower: default.treble_f_lower,
+            treble_f_upper: default.treble_f_upper,
+            treble_gain_k: default.treble_gain_k,
+            max_slope: default.max_slope,
+            min_mean_error: default.min_mean_error,
         }
     }
 }
@@ -137,7 +160,14 @@ pub unsafe extern "C" fn autoeq_eq_by_range(input: *const c_char) -> *mut c_char
     };
 
     let fs = req.fs.unwrap_or(44100.0);
-    let config_name = req.config.as_deref().unwrap_or("8_PEAKING_WITH_SHELVES");
+    // AUTO：交给 optimize_parametric_eq_with_ranges_n 自适应峰谷选频点（任意曲线贴合），
+    // n_filters = max_filters
+    let auto_n = if req.config.as_deref() == Some("AUTO") { req.max_filters } else { None };
+    let config_name = match req.config.as_deref() {
+        Some("AUTO") => "AUTO",
+        Some(c) => c,
+        None => "8_PEAKING_WITH_SHELVES",
+    };
     let preamp = req.preamp.unwrap_or(0.0);
 
     // 关键：target 的频率轴与 select 不同，必须先插值对齐
@@ -151,7 +181,26 @@ pub unsafe extern "C" fn autoeq_eq_by_range(input: *const c_char) -> *mut c_char
         crate::constants::DEFAULT_F_MIN, crate::constants::DEFAULT_F_MAX);
     let target_raw_aligned = target_fr.raw;
 
-    let params = ProcessParams { fs, preamp, ..ProcessParams::default() };
+    let defaults = ProcessParams::default();
+    let params = ProcessParams {
+        fs,
+        preamp,
+        window_size: req.window_size.unwrap_or(defaults.window_size),
+        treble_window_size: req.treble_window_size.unwrap_or(defaults.treble_window_size),
+        treble_f_lower: req.treble_f_lower.unwrap_or(defaults.treble_f_lower),
+        treble_f_upper: req.treble_f_upper.unwrap_or(defaults.treble_f_upper),
+        treble_gain_k: req.treble_gain_k.unwrap_or(defaults.treble_gain_k),
+        max_gain: req.max_gain.unwrap_or(defaults.max_gain),
+        max_slope: req.max_slope.unwrap_or(defaults.max_slope),
+        tilt: req.tilt.unwrap_or(defaults.tilt),
+        bass_boost_gain: req.bass_boost_gain.unwrap_or(defaults.bass_boost_gain),
+        bass_boost_fc: req.bass_boost_fc.unwrap_or(defaults.bass_boost_fc),
+        bass_boost_q: req.bass_boost_q.unwrap_or(defaults.bass_boost_q),
+        treble_boost_gain: req.treble_boost_gain.unwrap_or(defaults.treble_boost_gain),
+        treble_boost_fc: req.treble_boost_fc.unwrap_or(defaults.treble_boost_fc),
+        treble_boost_q: req.treble_boost_q.unwrap_or(defaults.treble_boost_q),
+        min_mean_error: req.min_mean_error.unwrap_or(defaults.min_mean_error),
+    };
 
     let _eq_result = match api::equalize_data(
         &req.select.frequency,
@@ -164,14 +213,25 @@ pub unsafe extern "C" fn autoeq_eq_by_range(input: *const c_char) -> *mut c_char
         Err(e) => return error_response(&format!("Equalize error: {}", e)),
     };
 
-    // PEQ 优化
-    let peq_result = match api::optimize_parametric_eq(
+    // PEQ 优化（gain_range/q_range 作为优化器边界约束）
+    let gain_range_opt = req.gain_range.as_ref().and_then(|r| match (r.low, r.high) {
+        (Some(lo), Some(hi)) => Some((lo, hi)),
+        _ => None,
+    });
+    let q_range_opt = req.q_range.as_ref().and_then(|r| match (r.low, r.high) {
+        (Some(lo), Some(hi)) => Some((lo, hi)),
+        _ => None,
+    });
+    let peq_result = match api::optimize_parametric_eq_with_ranges_n(
         &req.select.frequency,
         &req.select.raw,
         "select",
         &params,
         config_name,
         Some(&target_raw_aligned),
+        gain_range_opt,
+        q_range_opt,
+        auto_n,
     ) {
         Ok(r) => r,
         Err(e) => return error_response(&format!("PEQ error: {}", e)),
@@ -195,25 +255,9 @@ pub unsafe extern "C" fn autoeq_eq_by_range(input: *const c_char) -> *mut c_char
         }
     }
 
-    // 按 gain_range 过滤
-    if let Some(ref range) = req.gain_range {
-        if let Some(low) = range.low {
-            all_filters.retain(|f| f.gain.abs() >= low);
-        }
-        if let Some(high) = range.high {
-            all_filters.retain(|f| f.gain.abs() <= high);
-        }
-    }
-
-    // 按 q_range 过滤
-    if let Some(ref range) = req.q_range {
-        if let Some(low) = range.low {
-            all_filters.retain(|f| f.q >= low);
-        }
-        if let Some(high) = range.high {
-            all_filters.retain(|f| f.q <= high);
-        }
-    }
+    // gain_range / q_range：只作为响应回显字段，不参与事后过滤。
+    // 之前按 gain.abs() <= high 过滤会把 10kHz 以上的大增益补偿滤波器（如 -18.8dB）直接删掉，
+    // 导致高频曲线无法贴合。范围约束由优化器 config 的 bounds（min_gain/max_gain）负责。
 
     // 按 max_filters 限制数量 (保留增益最大的)
     if let Some(max) = req.max_filters {

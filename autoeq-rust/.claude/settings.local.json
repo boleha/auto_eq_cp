@@ -6,7 +6,10 @@
       "Bash(rustup show *)",
       "Bash(rustc --version)",
       "Bash(cargo --version)",
-      "Bash(cargo clean *)"
+      "Bash(cargo clean *)",
+      "Read(//d/workspace/project/project_python/auto/auto_eq_cp/**)",
+      "Read(//d/workspace/project/project_python/auto/auto_eq_cp/test_file/**)",
+      "Bash(cargo run *)"
     ]
   }
 }

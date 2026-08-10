@@ -1,0 +1,33 @@
+﻿Processing: onedsp.txt
+Target: target2019.txt
+Config: 10_PEAKING
+
+autoeq-cli.exe : Initial loss: 1.596649
+所在位置 行:1 字符: 1
++ & ".\target\release\autoeq-cli.exe" equalize "onedsp.txt" --target "t ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Initial loss: 1.596649:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Restart best loss: 0.199710
+Final loss: 0.199710
+Name: onedsp
+Frequency points: 695
+Frequency range: 20.0 - 19955.5 Hz
+Raw range: -19.06 - 8.76 dB
+Equalization range: -16.42 - 5.14 dB
+
+Parametric EQ (preamp: -5.19 dB):
+  Filter 1: Peaking fc=8284.8 Hz gain=-0.05 dB q=5.8546
+  Filter 2: Peaking fc=52.8 Hz gain=-2.19 dB q=5.9948
+  Filter 3: Peaking fc=31.1 Hz gain=1.91 dB q=3.3763
+  Filter 4: Peaking fc=47.4 Hz gain=3.94 dB q=2.0669
+  Filter 5: Peaking fc=22.5 Hz gain=3.65 dB q=2.5248
+  Filter 6: Peaking fc=372.1 Hz gain=-0.94 dB q=2.2562
+  Filter 7: Peaking fc=3969.3 Hz gain=0.93 dB q=2.1720
+  Filter 8: Peaking fc=13231.9 Hz gain=-19.81 dB q=2.5077
+  Filter 9: Peaking fc=13940.3 Hz gain=-7.86 dB q=5.4399
+  Filter 10: Peaking fc=7096.1 Hz gain=6.42 dB q=1.5056
+
+GraphicEQ:
+GraphicEQ: 20-5.3; 21-1.8; 22-1.6; 24-1.1; 25-1.4; 26-1.8; 28-1.7; 29-1.6; 31-1.9; 33-1.9; 35-2.0; 37-2.1; 39-1.8; 41-1.9; 43-2.0; 45-1.7; 48-1.6; 51-3.3; 54-4.1; 57-4.2; 60-3.1; 63-3.7; 67-4.6; 70-4.0; 74-4.2; 79-4.5; 83-4.8; 88-5.0; 93-5.1; 98-5.3; 103-5.4; 109-5.4; 115-5.5; 122-5.6; 129-5.6; 136-5.6; 144-5.5; 152-5.3; 160-5.3; 169-5.2; 179-5.2; 189-5.2; 200-5.2; 211-5.2; 223-5.2; 235-5.3; 248-5.2; 262-5.3; 277-5.7; 293-6.1; 309-6.1; 327-6.1; 345-6.1; 365-6.1; 385-6.1; 407-6.0; 430-6.0; 454-5.9; 479-5.9; 506-5.8; 535-5.7; 565-5.6; 597-5.6; 630-5.5; 666-5.4; 703-5.3; 743-5.3; 785-5.2; 829-5.2; 876-5.2; 925-5.3; 977-5.3; 1k-5.4; 1k-5.4; 1k-5.3; 1k-5.2; 1k-5.1; 1k-4.9; 1k-4.9; 2k-5.0; 2k-5.2; 2k-5.3; 2k-5.3; 2k-5.2; 2k-5.1; 2k-5.1; 2k-5.0; 2k-4.9; 2k-4.8; 3k-4.9; 3k-5.0; 3k-4.8; 3k-4.4; 3k-4.2; 3k-4.0; 4k-3.7; 4k-3.5; 4k-3.3; 4k-3.2; 5k-3.2; 5k-3.1; 5k-3.0; 5k-2.6; 6k-2.1; 6k-1.2; 6k-0.5; 7k-0.2; 7k-0.3; 7k-0.7; 8k-1.5; 8k-2.7; 9k-4.1; 9k-5.4; 10k-6.5; 10k-8.1; 11k-10.1; 11k-11.9; 12k-13.1; 13k-13.7; 14k-14.2; 14k-13.4; 15k-12.2; 16k-12.4; 17k-13.5; 18k-15.4; 19k-18.2; 20k-21.6

@@ -5,7 +5,7 @@ use crate::peq::{PEQ, PeqResult, FilterResult};
 use std::path::Path;
 
 /// Aggregated process parameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProcessParams {
     pub bass_boost_gain: f64,
     pub bass_boost_fc: f64,
@@ -17,6 +17,13 @@ pub struct ProcessParams {
     pub fs: f64,
     pub max_gain: f64,
     pub preamp: f64,
+    pub window_size: f64,
+    pub treble_window_size: f64,
+    pub treble_f_lower: f64,
+    pub treble_f_upper: f64,
+    pub treble_gain_k: f64,
+    pub max_slope: f64,
+    pub min_mean_error: bool,
 }
 
 impl Default for ProcessParams {
@@ -32,6 +39,13 @@ impl Default for ProcessParams {
             fs: DEFAULT_FS,
             max_gain: DEFAULT_MAX_GAIN,
             preamp: DEFAULT_PREAMP,
+            window_size: DEFAULT_SMOOTHING_WINDOW_SIZE,
+            treble_window_size: DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
+            treble_f_lower: DEFAULT_TREBLE_SMOOTHING_F_LOWER,
+            treble_f_upper: DEFAULT_TREBLE_SMOOTHING_F_UPPER,
+            treble_gain_k: DEFAULT_TREBLE_GAIN_K,
+            max_slope: DEFAULT_MAX_SLOPE,
+            min_mean_error: false,
         }
     }
 }
@@ -81,12 +95,12 @@ pub fn equalize_data(
 
     fr.compensate(&target, params.bass_boost_gain, params.bass_boost_fc, params.bass_boost_q,
                   params.treble_boost_gain, params.treble_boost_fc, params.treble_boost_q,
-                  params.tilt, params.fs);
-    fr.smoothen(DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-               DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER);
-    fr.equalize(params.max_gain, DEFAULT_MAX_SLOPE, 0.0, false,
-               DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-               DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER, DEFAULT_TREBLE_GAIN_K);
+                  params.tilt, params.fs, params.min_mean_error);
+    fr.smoothen(params.window_size, params.treble_window_size,
+               params.treble_f_lower, params.treble_f_upper);
+    fr.equalize(params.max_gain, params.max_slope, 0.0, false,
+               params.window_size, params.treble_window_size,
+               params.treble_f_lower, params.treble_f_upper, params.treble_gain_k);
 
     Ok(EqualizeResult {
         name: fr.name.clone(),
@@ -97,6 +111,21 @@ pub fn equalize_data(
         target: fr.target.clone(),
         error: fr.error.clone(),
     })
+}
+
+/// Full pipeline: equalize + parametric EQ + graphic EQ (single pass over the data).
+pub fn equalize_data_full(
+    frequency: &[f64],
+    raw: &[f64],
+    target_curve: Option<&[f64]>,
+    name: &str,
+    params: &ProcessParams,
+    peq_config_name: &str,
+) -> Result<(EqualizeResult, PeqResult, String)> {
+    let eq_result = equalize_data(frequency, raw, target_curve, name, params)?;
+    let peq_result = optimize_parametric_eq(frequency, raw, name, params, peq_config_name, target_curve)?;
+    let graphic_eq = generate_graphic_eq_curve(frequency, raw, name, params, target_curve)?;
+    Ok((eq_result, peq_result, graphic_eq))
 }
 
 /// Equalize a file and generate parametric EQ + graphic EQ.
@@ -135,12 +164,12 @@ pub fn equalize_file(
 
     fr.compensate(&target, params.bass_boost_gain, params.bass_boost_fc, params.bass_boost_q,
                   params.treble_boost_gain, params.treble_boost_fc, params.treble_boost_q,
-                  params.tilt, params.fs);
-    fr.smoothen(DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-               DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER);
-    fr.equalize(params.max_gain, DEFAULT_MAX_SLOPE, 0.0, false,
-               DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-               DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER, DEFAULT_TREBLE_GAIN_K);
+                  params.tilt, params.fs, params.min_mean_error);
+    fr.smoothen(params.window_size, params.treble_window_size,
+               params.treble_f_lower, params.treble_f_upper);
+    fr.equalize(params.max_gain, params.max_slope, 0.0, false,
+               params.window_size, params.treble_window_size,
+               params.treble_f_lower, params.treble_f_upper, params.treble_gain_k);
 
     // Optimize parametric EQ
     let config = PEQ_CONFIGS.get(peq_config_name)
@@ -159,7 +188,7 @@ pub fn equalize_file(
     let preamp = if peq.filters.is_empty() {
         params.preamp
     } else {
-        -peq.max_gain()
+        -peq.max_gain() - PREAMP_HEADROOM
     };
 
     let filters: Vec<FilterResult> = peq.filters.iter().map(|f| FilterResult {
@@ -195,6 +224,40 @@ pub fn optimize_parametric_eq(
     peq_config_name: &str,
     target_curve: Option<&[f64]>,
 ) -> Result<PeqResult> {
+    optimize_parametric_eq_with_ranges(
+        frequency, raw, name, params, peq_config_name, target_curve, None, None,
+    )
+}
+
+/// optimize_parametric_eq with gain/q range overrides.
+/// gain_range/q_range act as optimizer bound constraints (clamp), not post-hoc filters.
+/// n_filters: AUTO 模式下自适应峰谷选频点的数量。
+pub fn optimize_parametric_eq_with_ranges(
+    frequency: &[f64],
+    raw: &[f64],
+    name: &str,
+    params: &ProcessParams,
+    peq_config_name: &str,
+    target_curve: Option<&[f64]>,
+    gain_range: Option<(f64, f64)>,
+    q_range: Option<(f64, f64)>,
+) -> Result<PeqResult> {
+    optimize_parametric_eq_with_ranges_n(
+        frequency, raw, name, params, peq_config_name, target_curve, gain_range, q_range, None,
+    )
+}
+
+pub fn optimize_parametric_eq_with_ranges_n(
+    frequency: &[f64],
+    raw: &[f64],
+    name: &str,
+    params: &ProcessParams,
+    peq_config_name: &str,
+    target_curve: Option<&[f64]>,
+    gain_range: Option<(f64, f64)>,
+    q_range: Option<(f64, f64)>,
+    n_filters: Option<usize>,
+) -> Result<PeqResult> {
     let mut fr = FrequencyResponse::new(name, frequency.to_vec(), raw.to_vec())?;
     let _ = fr.interpolate(None, DEFAULT_STEP, DEFAULT_F_MIN, DEFAULT_F_MAX);
     let _ = fr.center(1000.0);
@@ -211,16 +274,31 @@ pub fn optimize_parametric_eq(
 
     fr.compensate(&target, params.bass_boost_gain, params.bass_boost_fc, params.bass_boost_q,
                   params.treble_boost_gain, params.treble_boost_fc, params.treble_boost_q,
-                  params.tilt, params.fs);
-    fr.smoothen(DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-               DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER);
-    fr.equalize(params.max_gain, DEFAULT_MAX_SLOPE, 0.0, false,
-               DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-               DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER, DEFAULT_TREBLE_GAIN_K);
+                  params.tilt, params.fs, params.min_mean_error);
+    fr.smoothen(params.window_size, params.treble_window_size,
+               params.treble_f_lower, params.treble_f_upper);
+    fr.equalize(params.max_gain, params.max_slope, 0.0, false,
+               params.window_size, params.treble_window_size,
+               params.treble_f_lower, params.treble_f_upper, params.treble_gain_k);
 
-    let config = PEQ_CONFIGS.get(peq_config_name)
+    let mut config = PEQ_CONFIGS.get(peq_config_name)
         .or_else(|| PEQ_CONFIGS.get("8_PEAKING_WITH_SHELVES"))
-        .unwrap();
+        .unwrap()
+        .clone();
+
+    // Apply gain/q range constraints to every filter's bounds (optimizer clamps within them)
+    if gain_range.is_some() || q_range.is_some() {
+        for fc in config.filters.iter_mut() {
+            if let Some((lo, hi)) = gain_range {
+                fc.min_gain = Some(lo);
+                fc.max_gain = Some(hi);
+            }
+            if let Some((lo, hi)) = q_range {
+                fc.min_q = Some(lo);
+                fc.max_q = Some(hi);
+            }
+        }
+    }
 
     let eq_target = if !fr.equalization.is_empty() {
         fr.equalization.clone()
@@ -228,7 +306,29 @@ pub fn optimize_parametric_eq(
         fr.error.clone()
     };
 
-    let mut peq = PEQ::from_config(config, fr.frequency.clone(), params.fs, eq_target)?;
+    // AUTO：对数均匀频点（25Hz-18kHz，n 个），保证全频段覆盖且高频贴合。
+    // （峰谷自适应会把低频峰谷全占满导致高频没滤波器，对数均匀最稳）
+    if peq_config_name == "AUTO" {
+        let n = n_filters.unwrap_or(8);
+        if let Some(adaptive) = adaptive_peak_config(&eq_target, &fr.frequency, n) {
+            config = adaptive;
+            // 应用 gain/q 范围约束
+            if gain_range.is_some() || q_range.is_some() {
+                for fc in config.filters.iter_mut() {
+                    if let Some((lo, hi)) = gain_range {
+                        fc.min_gain = Some(lo);
+                        fc.max_gain = Some(hi);
+                    }
+                    if let Some((lo, hi)) = q_range {
+                        fc.min_q = Some(lo);
+                        fc.max_q = Some(hi);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut peq = PEQ::from_config(&config, fr.frequency.clone(), params.fs, eq_target)?;
     peq.optimize(None)?;
 
     let preamp = if peq.filters.is_empty() {
@@ -271,12 +371,12 @@ pub fn generate_graphic_eq_curve(
 
     fr.compensate(&target, params.bass_boost_gain, params.bass_boost_fc, params.bass_boost_q,
                   params.treble_boost_gain, params.treble_boost_fc, params.treble_boost_q,
-                  params.tilt, params.fs);
-    fr.smoothen(DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-               DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER);
-    fr.equalize(params.max_gain, DEFAULT_MAX_SLOPE, 0.0, false,
-               DEFAULT_SMOOTHING_WINDOW_SIZE, DEFAULT_TREBLE_SMOOTHING_WINDOW_SIZE,
-               DEFAULT_TREBLE_SMOOTHING_F_LOWER, DEFAULT_TREBLE_SMOOTHING_F_UPPER, DEFAULT_TREBLE_GAIN_K);
+                  params.tilt, params.fs, params.min_mean_error);
+    fr.smoothen(params.window_size, params.treble_window_size,
+               params.treble_f_lower, params.treble_f_upper);
+    fr.equalize(params.max_gain, params.max_slope, 0.0, false,
+               params.window_size, params.treble_window_size,
+               params.treble_f_lower, params.treble_f_upper, params.treble_gain_k);
 
     Ok(fr.eqapo_graphic_eq(true, params.preamp, DEFAULT_GRAPHIC_EQ_STEP))
 }
@@ -284,4 +384,38 @@ pub fn generate_graphic_eq_curve(
 /// Get list of available PEQ config names.
 pub fn get_available_configs() -> Vec<&'static str> {
     PEQ_CONFIGS.keys().copied().collect()
+}
+
+/// 对数均匀频点（25Hz-18kHz，n 个），fc 固定只优化 gain/q——保证全频段覆盖且高频贴合。
+/// （峰谷自适应会把低频峰谷全占满导致高频没滤波器，对数均匀最稳）
+pub fn adaptive_peak_config(
+    _target: &[f64],
+    _frequency: &[f64],
+    n_filters: usize,
+) -> Option<PeqConfig> {
+    use crate::constants::FilterConfig;
+    use crate::constants::FilterType;
+
+    let n = if n_filters < 2 { 2 } else { n_filters };
+    let filters: Vec<FilterConfig> = (0..n).map(|i| {
+        let fc = 25.0_f64 * (18000.0_f64 / 25.0_f64).powf(i as f64 / (n - 1) as f64);
+        FilterConfig {
+            filter_type: Some(FilterType::Peaking),
+            fc: Some(fc),
+            q: None,
+            gain: None,
+            min_fc: None,
+            max_fc: None,
+            min_q: None,
+            max_q: None,
+            min_gain: None,
+            max_gain: None,
+        }
+    }).collect();
+
+    Some(PeqConfig {
+        optimizer: crate::constants::OptimizerConfig { max_time: Some(0.5), ..Default::default() },
+        filter_defaults: None,
+        filters,
+    })
 }

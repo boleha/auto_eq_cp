@@ -74,7 +74,13 @@
       "Bash(winget *)",
       "Bash(where python3.11)",
       "Bash(where py *)",
-      "Bash(py *)"
+      "Bash(py *)",
+      "Bash(wsl --list)",
+      "Bash(wsl -e \"uname -a\")",
+      "Bash(wsl *)",
+      "Bash(lld --version)",
+      "Bash(ld.lld --version)",
+      "Bash(cargo zigbuild *)"
     ]
   }
 }
