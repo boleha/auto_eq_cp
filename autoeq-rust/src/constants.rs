@@ -246,18 +246,17 @@ pub static PEQ_CONFIGS: LazyLock<HashMap<&'static str, PeqConfig>> = LazyLock::n
         },
     });
 
-    // FIXED_5_PEAKING: 固定对数分布频点（覆盖 20-20k 全频段），只优化 gain/q——
-    // 自由 fc 优化会把所有滤波器堆到低频/中频（peaking 拟合不了高频平滑斜坡），
-    // 固定频点保证 10k+ 有滤波器，高频贴合
+    // FIXED_5_PEAKING: 固定频点（30/250/1200/7000/16000），低频/中频/高频均衡，
+    // 中频 1200/7000 覆盖 100-10k，高频 16000 覆盖 10k+，观感贴合
     m.insert("FIXED_5_PEAKING", PeqConfig {
         optimizer: OptimizerConfig { max_time: Some(0.5), ..Default::default() },
         filter_defaults: None,
         filters: vec![
-            peaking_fixed_fc(29.0),
-            peaking_fixed_fc(99.0),
-            peaking_fixed_fc(462.0),
-            peaking_fixed_fc(7070.0),
-            peaking_fixed_fc(14981.0),
+            peaking_fixed_fc(30.0),
+            peaking_fixed_fc(250.0),
+            peaking_fixed_fc(1200.0),
+            peaking_fixed_fc(7000.0),
+            peaking_fixed_fc(16000.0),
         ],
     });
 

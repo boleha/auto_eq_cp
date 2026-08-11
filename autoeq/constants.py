@@ -85,14 +85,14 @@ PEQ_CONFIGS = {
         'filters': [{'type': 'PEAKING'}] * 10
     },
     'FIXED_5_PEAKING': {
-        # 固定对数分布频点（覆盖 20-20k 全频段），只优化 gain/q——参考工具风格，
-        # 避免自由 fc 优化把所有滤波器堆到低频/中频导致高频不贴合
+        # 5 个固定频点（30/250/1200/7000/16000）：低频/中频/高频均衡分布，
+        # 中频 1200/7000 覆盖 100-10k 段，高频 16000 覆盖 10k+，观感贴合
         'filters': [
-            {'type': 'PEAKING', 'fc': 29.0},
-            {'type': 'PEAKING', 'fc': 99.0},
-            {'type': 'PEAKING', 'fc': 462.0},
-            {'type': 'PEAKING', 'fc': 7070.0},
-            {'type': 'PEAKING', 'fc': 14981.0},
+            {'type': 'PEAKING', 'fc': 30.0},
+            {'type': 'PEAKING', 'fc': 250.0},
+            {'type': 'PEAKING', 'fc': 1200.0},
+            {'type': 'PEAKING', 'fc': 7000.0},
+            {'type': 'PEAKING', 'fc': 16000.0},
         ]
     },
     'FIXED_8_PEAKING': {
