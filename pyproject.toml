@@ -21,8 +21,10 @@ classifiers = [
 dependencies = [
     'Pillow>=10.0.1',
     'matplotlib>=3.7.3',
-    'scipy>=1.10.1',
-    'numpy>=1.24.4',
+    # 锁定 scipy/numpy 版本：SLSQP 优化器在不同版本间收敛结果有差异，
+    # 必须与本地开发环境一致，否则 Docker/GitHub Action 打包出来的结果不同
+    'scipy==1.17.1',
+    'numpy==2.4.6',
     'tabulate>=0.9.0',
     'soundfile>=0.12.1',
     'pyyaml>=6.0',
