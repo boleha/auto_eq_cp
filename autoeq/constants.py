@@ -70,6 +70,16 @@ HARMAN_INEAR_PREFENCE_FREQUENCIES = [20.0, 21.2, 22.4, 23.6, 25.0, 26.5, 28.0, 3
 
 PREAMP_HEADROOM = 0.2
 
+def _free_peaking_bands(count, min_fc=20.0, max_fc=20000.0):
+    """Create free-fc peaking filters split into logarithmic frequency bands."""
+    ratio = (max_fc / min_fc) ** (1 / count)
+    edges = [min_fc * ratio ** i for i in range(count + 1)]
+    return [
+        {'type': 'PEAKING', 'min_fc': edges[i], 'max_fc': edges[i + 1]}
+        for i in range(count)
+    ]
+
+
 PEQ_CONFIGS = {
     '10_BAND_GRAPHIC_EQ': {
         'optimizer': {'min_std': 0.01},
@@ -82,10 +92,45 @@ PEQ_CONFIGS = {
         'filters': [{'fc': 20 * 2 ** (i / 3), 'type': 'PEAKING'} for i in range(31)]
     },
     '10_PEAKING': {
-        'filters': [{'type': 'PEAKING'}] * 10
+        'optimizer': {
+            'visual_fit': True,
+            'visual_high_weight': 2.0,
+            'min_log_spacing': 0.45,
+            'spacing_penalty': 2.0,
+            'min_std': 0.0001,
+            'banded_visual': True,
+        },
+        'filters': _free_peaking_bands(10)
+    },
+    '8_PEAKING': {
+        'optimizer': {
+            'visual_fit': True,
+            'visual_high_weight': 2.0,
+            'min_log_spacing': 0.45,
+            'spacing_penalty': 2.0,
+            'min_std': 0.0001,
+            'banded_visual': True,
+        },
+        'filters': _free_peaking_bands(8)
     },
     '5_PEAKING': {
-        'filters': [{'type': 'PEAKING'}] * 5
+        # 视觉拟合：保留高频形状，并避免滤波器挤在同一小段频率
+        'optimizer': {
+            'visual_fit': True,
+            'visual_high_weight': 3.0,
+            'min_log_spacing': 0.45,
+            'spacing_penalty': 2.0,
+            'min_std': 0.0001,
+            'banded_visual': True,
+        },
+        # 每个滤波器负责一个宽频段；fc 在段内自由优化，不写死具体频率
+        'filters': [
+            {'type': 'PEAKING', 'min_fc': 20.0, 'max_fc': 100.0},
+            {'type': 'PEAKING', 'min_fc': 100.0, 'max_fc': 500.0},
+            {'type': 'PEAKING', 'min_fc': 500.0, 'max_fc': 2000.0},
+            {'type': 'PEAKING', 'min_fc': 2000.0, 'max_fc': 10000.0},
+            {'type': 'PEAKING', 'min_fc': 10000.0, 'max_fc': 20000.0},
+        ]
     },
     'FIXED_5_PEAKING': {
         # 5 个固定频点（30/250/1200/7000/16000）：低频/中频/高频均衡分布，
@@ -130,6 +175,13 @@ PEQ_CONFIGS = {
         # 5 个滤波器：双 shelf 组合（LowShelf 低频提升 + HighShelf 高频衰减）+ 3 peaking
         # 目标：合成曲线贴合目标曲线（拟合工具，非听感调音）——shelf fc 范围放宽，
         # 高频 shelf 可下探到 2k，低频 shelf 上探到 500，让优化器有足够自由度贴合滚降段
+        'optimizer': {
+            'visual_fit': True,
+            'visual_high_weight': 2.0,
+            'min_log_spacing': 0.45,
+            'spacing_penalty': 2.0,
+            'min_std': 0.0001,
+        },
         'filters': [
             {'type': 'LOW_SHELF', 'min_fc': 30.0, 'max_fc': 500.0, 'min_q': 0.4, 'max_q': 1.2},
             {'type': 'HIGH_SHELF', 'min_fc': 2000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 1.0},
@@ -140,6 +192,13 @@ PEQ_CONFIGS = {
     },
     'FIXED_8_WITH_SHELVES': {
         # 8 个滤波器：双 shelf 自由 + 6 peaking
+        'optimizer': {
+            'visual_fit': True,
+            'visual_high_weight': 2.0,
+            'min_log_spacing': 0.45,
+            'spacing_penalty': 2.0,
+            'min_std': 0.0001,
+        },
         'filters': [
             {'type': 'LOW_SHELF', 'min_fc': 30.0, 'max_fc': 500.0, 'min_q': 0.4, 'max_q': 1.2},
             {'type': 'HIGH_SHELF', 'min_fc': 2000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 1.0},
@@ -153,6 +212,12 @@ PEQ_CONFIGS = {
     },
     'FIXED_10_WITH_SHELVES': {
         # 10 个滤波器：双 shelf 自由 + 8 peaking
+        'optimizer': {
+            'visual_fit': True,
+            'visual_high_weight': 2.0,
+            'min_log_spacing': 0.45,
+            'spacing_penalty': 2.0,
+        },
         'filters': [
             {'type': 'LOW_SHELF', 'min_fc': 30.0, 'max_fc': 500.0, 'min_q': 0.4, 'max_q': 1.2},
             {'type': 'HIGH_SHELF', 'min_fc': 2000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 1.0},

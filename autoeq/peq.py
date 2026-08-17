@@ -222,7 +222,13 @@ class Peaking(PEQFilter):
         # This spreads filters across bands instead of letting every filter chase the single
         # biggest peak, which otherwise leaves high bands visually flat.
         n_buckets = 5
-        use_buckets = self.optimize_fc and getattr(self, '_init_index', None) is not None and n_buckets > 1 and len(peak_ixs) > 1
+        use_buckets = (
+            self.optimize_fc
+            and not getattr(self, '_banded_visual', False)
+            and getattr(self, '_init_index', None) is not None
+            and n_buckets > 1
+            and len(peak_ixs) > 1
+        )
         if use_buckets:
             log_pos = np.log10(np.clip(self.f[peak_ixs], 1.0, None))
             log_min = np.log10(self.min_fc)
@@ -367,9 +373,14 @@ class HighShelf(ShelfFilter):
         if self.optimize_fc:
             # Find point where the ratio of average level after the point and average level before the point is the
             # greatest
-            min_ix = np.sum(self.f < max(40, self.min_fc))
-            max_ix = np.sum(self.f < min(10000, self.max_fc))
-            ix = np.argmax([np.abs(np.mean(target[ix:])) for ix in range(min_ix, max_ix)])
+            min_ix = int(np.searchsorted(self.f, self.min_fc, side='left'))
+            max_ix = int(np.searchsorted(self.f, self.max_fc, side='right'))
+            if max_ix <= min_ix:
+                ix = (min_ix + max_ix) // 2
+            else:
+                local_ix = np.argmax([np.abs(np.mean(target[ix:])) for ix in range(min_ix, max_ix)])
+                ix = min_ix + int(local_ix)
+            ix = min(max(ix, 0), len(self.f) - 1)
             self.fc = np.clip(self.f[ix], self.min_fc, self.max_fc)
             params.append(np.log10(self.fc))
         if self.optimize_q:
@@ -419,10 +430,14 @@ class LowShelf(ShelfFilter):
         if self.optimize_fc:
             # Find point where the ratio of average level before the point and average level after the point is the
             # greatest
-            min_ix = np.sum(self.f < max(40, self.min_fc))
-            max_ix = np.sum(self.f < min(10000, self.max_fc))
-            ix = np.argmax([np.abs(np.mean(target[:ix + 1])) for ix in range(min_ix, max_ix)])
-            ix += min_ix
+            min_ix = int(np.searchsorted(self.f, self.min_fc, side='left'))
+            max_ix = int(np.searchsorted(self.f, self.max_fc, side='right'))
+            if max_ix <= min_ix:
+                ix = (min_ix + max_ix) // 2
+            else:
+                local_ix = np.argmax([np.abs(np.mean(target[:ix + 1])) for ix in range(min_ix, max_ix)])
+                ix = min_ix + int(local_ix)
+            ix = min(max(ix, 0), len(self.f) - 1)
             self.fc = np.clip(self.f[ix], self.min_fc, self.max_fc)
             params.append(np.log10(self.fc))
         if self.optimize_q:
@@ -469,7 +484,9 @@ class PEQ:
     def __init__(self, f, fs, filters=None, target=None,
                  min_f=DEFAULT_PEQ_OPTIMIZER_MIN_F, max_f=DEFAULT_PEQ_OPTIMIZER_MAX_F,
                  max_time=DEFAULT_PEQ_OPTIMIZER_MAX_TIME, target_loss=DEFAULT_PEQ_OPTIMIZER_TARGET_LOSS,
-                 min_change_rate=DEFAULT_PEQ_OPTIMIZER_MIN_CHANGE_RATE, min_std=DEFAULT_PEQ_OPTIMIZER_MIN_STD):
+                 min_change_rate=DEFAULT_PEQ_OPTIMIZER_MIN_CHANGE_RATE, min_std=DEFAULT_PEQ_OPTIMIZER_MIN_STD,
+                 visual_fit=False, visual_high_weight=1.0, min_log_spacing=None, spacing_penalty=0.0,
+                 banded_visual=False):
         self.f = np.array(f)
         self.fs = fs
         self.filters = []
@@ -488,6 +505,11 @@ class PEQ:
         self._target_loss = target_loss if target_loss is not None else DEFAULT_PEQ_OPTIMIZER_TARGET_LOSS
         self._min_change_rate = min_change_rate
         self._min_std = min_std if min_std is not None else DEFAULT_PEQ_OPTIMIZER_MIN_STD
+        self._visual_fit = visual_fit
+        self._visual_high_weight = max(1.0, visual_high_weight)
+        self._min_log_spacing = min_log_spacing
+        self._spacing_penalty = max(0.0, spacing_penalty)
+        self._banded_visual = banded_visual
         self.history = None
 
     @classmethod
@@ -623,16 +645,36 @@ class PEQ:
         # Update filters with latest iteration params
         if parse:
             self._parse_optimizer_params(params)
-        # Above 10 kHz only the total energy matters so we'll take the average
+        # Above 10 kHz only the total energy matters in the original AutoEq mode.
+        # Visual-fit configs keep each high-frequency point and can weight that
+        # region so a visually obvious treble mismatch is not ignored.
         fr = self.fr.copy()
         target = self.target.copy()
-        target[self._10k_ix:] = np.mean(target[self._10k_ix:])
-        fr[self._10k_ix:] = np.mean(self.fr[self._10k_ix:])
+        if not self._visual_fit:
+            target[self._10k_ix:] = np.mean(target[self._10k_ix:])
+            fr[self._10k_ix:] = np.mean(self.fr[self._10k_ix:])
         # Mean squared error as loss, between minimum and maximum frequencies
-        loss_val = np.mean(np.square(target[self._min_f_ix:self._max_f_ix] - fr[self._min_f_ix:self._max_f_ix]))
+        error = np.square(target[self._min_f_ix:self._max_f_ix] - fr[self._min_f_ix:self._max_f_ix])
+        if self._visual_fit and self._visual_high_weight > 1.0:
+            weights = np.ones(len(error))
+            high_start = max(0, self._10k_ix - self._min_f_ix)
+            weights[high_start:] = self._visual_high_weight
+            loss_val = np.average(error, weights=weights)
+        else:
+            loss_val = np.mean(error)
         # Sum penalties from all filters to MSE
         for filt in self.filters:
             loss_val += filt.sharpness_penalty
+        if self._min_log_spacing is not None and self._spacing_penalty > 0:
+            free_fcs = sorted(
+                filt.fc for filt in self.filters
+                if filt.optimize_fc and filt.fc is not None
+            )
+            for left, right in zip(free_fcs, free_fcs[1:]):
+                spacing = np.log2(right / left)
+                deficit = self._min_log_spacing - spacing
+                if deficit > 0:
+                    loss_val += self._spacing_penalty * deficit * deficit
         return np.sqrt(loss_val)
 
     def _init_optimizer_params(self):

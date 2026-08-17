@@ -644,6 +644,63 @@ async def eq_by_range(request: EqRangeRequest):
         if request.config == '10_PEAKING' and request.max_filters is not None and request.max_filters <= 5:
             effective_config = '5_PEAKING'
         peq_config = PEQ_CONFIGS.get(effective_config, PEQ_CONFIGS['8_PEAKING_WITH_SHELVES'])
+
+        # PEAKING / SHELVES 按请求的 max_filters 和 eq_range 动态分段：
+        # 每个滤波器在自己的对数频段内自由寻找最佳 fc/q/gain，
+        # 而不是先用全频配置计算后再把区间外滤波器删掉。
+        peaking_configs = {'5_PEAKING', '8_PEAKING', '10_PEAKING'}
+        shelf_configs = {
+            'FIXED_5_WITH_SHELVES',
+            'FIXED_8_WITH_SHELVES',
+            'FIXED_10_WITH_SHELVES',
+            '8_PEAKING_WITH_SHELVES',
+        }
+        dynamic_configs = peaking_configs | shelf_configs
+        if effective_config in dynamic_configs and request.max_filters is not None:
+            count = max(1, int(request.max_filters))
+            band_low = max(20.0, float(request.eq_range.low))
+            band_high = min(20000.0, float(request.eq_range.high))
+            if band_high <= band_low:
+                raise HTTPException(status_code=400, detail='eq_range.high 必须大于 eq_range.low')
+            treble_start = min(max(float(request.treble_f_lower), band_low), band_high)
+
+            def log_edges(low, high, amount):
+                if amount <= 0 or high <= low:
+                    return []
+                ratio = (high / low) ** (1 / amount)
+                return [low * ratio ** i for i in range(amount + 1)]
+
+            # 高频加密：预留约 30% 的滤波器给 treble 区域，避免所有滤波器
+            # 都集中在低中频。5/8/10 个滤波器分别约为 3+2、5+3、7+3。
+            if treble_start < band_high and count >= 3:
+                high_count = min(count - 1, max(2, int(np.ceil(count * 0.3))))
+                low_count = count - high_count
+                low_edges = log_edges(band_low, treble_start, low_count)
+                high_edges = log_edges(treble_start, band_high, high_count)
+                edges = low_edges[:-1] + high_edges
+            else:
+                edges = log_edges(band_low, band_high, count)
+
+            if effective_config in peaking_configs:
+                peq_config = deepcopy(PEQ_CONFIGS['5_PEAKING'])
+                peq_config['filters'] = [
+                    {'type': 'PEAKING', 'min_fc': edges[i], 'max_fc': edges[i + 1]}
+                    for i in range(count)
+                ]
+            elif count >= 3:
+                # shelf 配置：第一个区间放 LowShelf，最后一个区间放
+                # HighShelf，中间区间放 Peaking，所有 fc 都在自己的区间内优化。
+                peq_config = deepcopy(PEQ_CONFIGS[effective_config])
+                peq_config.setdefault('optimizer', {})['banded_visual'] = True
+                peq_config['filters'] = [
+                    {
+                        'type': 'LOW_SHELF' if i == 0 else 'HIGH_SHELF' if i == count - 1 else 'PEAKING',
+                        'min_fc': edges[i],
+                        'max_fc': edges[i + 1],
+                    }
+                    for i in range(count)
+                ]
+
         # AUTO：对数均匀频点（25Hz-18kHz，n 个），保证全频段覆盖且高频贴合。
         # （峰谷自适应会把低频峰谷全占满导致高频没滤波器，对数均匀最稳）
         if effective_config == 'AUTO':
@@ -666,9 +723,20 @@ async def eq_by_range(request: EqRangeRequest):
                 if has_q_range:
                     fc_cfg['min_q'] = float(request.q_range.low)
                     fc_cfg['max_q'] = float(request.q_range.high)
-        # 多起点优化（3 组不同频段偏移初始化，取 loss 最小），提升曲线贴合度：
-        # 5_PEAKING 与 WITH_SHELVES 系列都启用（贴合目标是"合成曲线贴合目标曲线"）
-        multi_start = 3 if effective_config in ('5_PEAKING', 'FIXED_5_WITH_SHELVES', 'FIXED_8_WITH_SHELVES', 'FIXED_10_WITH_SHELVES', '8_PEAKING_WITH_SHELVES') else None
+        # 多起点优化，提升曲线贴合度：
+        # 5/8_PEAKING 单组已足够（频段已隔离）；10_PEAKING 用 2 组平衡速度；
+        # shelf 系列用 3 组。
+        # 目标是合成曲线贴合测试目标，不是听感调音。
+        if effective_config == '5_PEAKING':
+            multi_start = 1
+        elif effective_config == '8_PEAKING':
+            multi_start = 1
+        elif effective_config == '10_PEAKING':
+            multi_start = 2
+        elif effective_config in ('FIXED_5_WITH_SHELVES', 'FIXED_8_WITH_SHELVES', 'FIXED_10_WITH_SHELVES', '8_PEAKING_WITH_SHELVES'):
+            multi_start = 3
+        else:
+            multi_start = None
         peqs = fr.optimize_parametric_eq(peq_config, request.fs, preamp=request.preamp, multi_start=multi_start)
 
         low = request.eq_range.low
