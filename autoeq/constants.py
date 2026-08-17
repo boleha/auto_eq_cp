@@ -84,6 +84,9 @@ PEQ_CONFIGS = {
     '10_PEAKING': {
         'filters': [{'type': 'PEAKING'}] * 10
     },
+    '5_PEAKING': {
+        'filters': [{'type': 'PEAKING'}] * 5
+    },
     'FIXED_5_PEAKING': {
         # 5 个固定频点（30/250/1200/7000/16000）：低频/中频/高频均衡分布，
         # 中频 1200/7000 覆盖 100-10k 段，高频 16000 覆盖 10k+，观感贴合
@@ -124,10 +127,12 @@ PEQ_CONFIGS = {
         ]
     },
     'FIXED_5_WITH_SHELVES': {
-        # 5 个滤波器：双 shelf 自由（LowShelf 低频提升 + HighShelf 高频衰减）+ 3 peaking
+        # 5 个滤波器：双 shelf 组合（LowShelf 低频提升 + HighShelf 高频衰减）+ 3 peaking
+        # 目标：合成曲线贴合目标曲线（拟合工具，非听感调音）——shelf fc 范围放宽，
+        # 高频 shelf 可下探到 2k，低频 shelf 上探到 500，让优化器有足够自由度贴合滚降段
         'filters': [
-            {'type': 'LOW_SHELF', 'min_fc': 50.0, 'max_fc': 200.0, 'min_q': 0.4, 'max_q': 0.9},
-            {'type': 'HIGH_SHELF', 'min_fc': 5000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 0.7},
+            {'type': 'LOW_SHELF', 'min_fc': 30.0, 'max_fc': 500.0, 'min_q': 0.4, 'max_q': 1.2},
+            {'type': 'HIGH_SHELF', 'min_fc': 2000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 1.0},
             {'type': 'PEAKING'},
             {'type': 'PEAKING'},
             {'type': 'PEAKING'},
@@ -136,8 +141,8 @@ PEQ_CONFIGS = {
     'FIXED_8_WITH_SHELVES': {
         # 8 个滤波器：双 shelf 自由 + 6 peaking
         'filters': [
-            {'type': 'LOW_SHELF', 'min_fc': 50.0, 'max_fc': 200.0, 'min_q': 0.4, 'max_q': 0.9},
-            {'type': 'HIGH_SHELF', 'min_fc': 5000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 0.7},
+            {'type': 'LOW_SHELF', 'min_fc': 30.0, 'max_fc': 500.0, 'min_q': 0.4, 'max_q': 1.2},
+            {'type': 'HIGH_SHELF', 'min_fc': 2000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 1.0},
             {'type': 'PEAKING'},
             {'type': 'PEAKING'},
             {'type': 'PEAKING'},
@@ -149,8 +154,8 @@ PEQ_CONFIGS = {
     'FIXED_10_WITH_SHELVES': {
         # 10 个滤波器：双 shelf 自由 + 8 peaking
         'filters': [
-            {'type': 'LOW_SHELF', 'min_fc': 50.0, 'max_fc': 200.0, 'min_q': 0.4, 'max_q': 0.9},
-            {'type': 'HIGH_SHELF', 'min_fc': 5000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 0.7},
+            {'type': 'LOW_SHELF', 'min_fc': 30.0, 'max_fc': 500.0, 'min_q': 0.4, 'max_q': 1.2},
+            {'type': 'HIGH_SHELF', 'min_fc': 2000.0, 'max_fc': 12000.0, 'min_q': 0.4, 'max_q': 1.0},
             {'type': 'PEAKING'},
             {'type': 'PEAKING'},
             {'type': 'PEAKING'},
@@ -167,12 +172,16 @@ PEQ_CONFIGS = {
         },
         'filters': [{
             'type': 'LOW_SHELF',
-            'fc': 105.0,
-            'q': 0.7
+            'min_fc': 30.0,
+            'max_fc': 500.0,
+            'min_q': 0.4,
+            'max_q': 1.2
         }, {
             'type': 'HIGH_SHELF',
-            'fc': 10000.0,
-            'q': 0.7
+            'min_fc': 2000.0,
+            'max_fc': 12000.0,
+            'min_q': 0.4,
+            'max_q': 1.0
         }] + [{'type': 'PEAKING'}] * 8
     },
     '4_PEAKING_WITH_SHELVES': {

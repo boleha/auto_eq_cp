@@ -169,6 +169,11 @@ class Peaking(PEQFilter):
         frequency at the peak's location. Quality is set in such a way that the filter width matches the peak width
         and gain is set to the peak height.
 
+        For visual fit (curve looks close on screen), filters should be spread across bands rather than
+        all concentrating on the single biggest peak. We therefore bucket peaks by log-frequency position
+        and pick the biggest peak from the bucket that has the fewest filters so far (or the global
+        biggest peak when only one bucket remains).
+
         Args:
             target: Equalizer target frequency response
 
@@ -208,17 +213,47 @@ class Peaking(PEQFilter):
         # Properties of included peaks together
         widths = np.concatenate([peak_props['widths'], dip_props['widths']])[mask]
         heights = np.concatenate([peak_props['peak_heights'], dip_props['peak_heights']])[mask]
-        # Find the biggest peak, by height AND width
+        # Size of each peak for ranking
         sizes = widths * heights  # Size of each peak for ranking
-        ixs_ix = np.argmax(sizes)  # Index to indexes array which point to the biggest peak
-        ix = peak_ixs[ixs_ix]  # Index to f and target
+
+        # Band-spread selection (visual fit): pick the biggest peak within the log-frequency
+        # band that corresponds to this filter's position. `self._init_index` is set by
+        # PEQ._init_optimizer_params before each init() call (0-based filter order).
+        # This spreads filters across bands instead of letting every filter chase the single
+        # biggest peak, which otherwise leaves high bands visually flat.
+        n_buckets = 5
+        use_buckets = self.optimize_fc and getattr(self, '_init_index', None) is not None and n_buckets > 1 and len(peak_ixs) > 1
+        if use_buckets:
+            log_pos = np.log10(np.clip(self.f[peak_ixs], 1.0, None))
+            log_min = np.log10(self.min_fc)
+            log_max = np.log10(self.max_fc)
+            bucket = np.clip(((log_pos - log_min) / max(log_max - log_min, 1e-9) * n_buckets).astype(int), 0, n_buckets - 1)
+            # prefer the bucket for this filter index (+ 多起点轮转偏移)；空桶回退到最近的有峰桶
+            offset = getattr(self, '_init_offset', 0) or 0
+            wanted = (self._init_index + offset) % n_buckets
+            candidates = [b for b in range(n_buckets) if np.any(bucket == b)]
+            if wanted in candidates:
+                chosen = wanted
+            else:
+                chosen = min(candidates, key=lambda b: abs(b - wanted))
+            mask_b = bucket == chosen
+            peak_ixs_b = peak_ixs[mask_b]
+            sizes_b = sizes[mask_b]
+            local_ix = int(np.argmax(sizes_b))
+            ix = peak_ixs_b[local_ix]
+        else:
+            ixs_ix = int(np.argmax(sizes))  # Index to indexes array which point to the biggest peak
+            ix = peak_ixs[ixs_ix]  # Index to f and target
 
         params = []
         if self.optimize_fc:
             self.fc = np.clip(self.f[ix], self.min_fc, self.max_fc)
             params.append(np.log10(self.fc))  # Convert to logarithmic scale for optimizer
         if self.optimize_q:
-            width = widths[ixs_ix]
+            # width/height/sizes 数组与 peak_ixs 一一对应（都经过同一 mask），
+            # 直接按峰在数组中的位置取，避免索引错位
+            peak_pos = int(np.nonzero(peak_ixs == ix)[0][0])
+            width = widths[peak_pos]
             # Find bandwidth which matches the peak width
             f_step = np.log2(self.f[1] / self.f[0])
             bw = np.log2((2 ** f_step) ** width)
@@ -227,8 +262,9 @@ class Peaking(PEQFilter):
             self.q = np.clip(self.q, self.min_q, self.max_q)
             params.append(self.q)
         if self.optimize_gain:
+            peak_pos = int(np.nonzero(peak_ixs == ix)[0][0])
             # Target value at center frequency
-            self.gain = heights[ixs_ix] if target[ix] > 0 else -heights[ixs_ix]
+            self.gain = heights[peak_pos] if target[ix] > 0 else -heights[peak_pos]
             self.gain = np.clip(self.gain, self.min_gain, self.max_gain)
             params.append(self.gain)
         return params
@@ -632,8 +668,12 @@ class PEQ:
         # Indexes to self.filters sorted by filter init order
         filter_argsort = sorted(list(range(len(self.filters))), key=init_order, reverse=True)
         remaining_target = self.target.copy()
-        for ix in filter_argsort:  # Iterate sorted filter indexes
+        for init_seq, ix in enumerate(filter_argsort):  # Iterate sorted filter indexes
             filt = self.filters[ix]  # Get filter
+            # 频段分散初始化：每个滤波器按其序号对应不同频段选峰（视觉贴合）；
+            # _init_offset 供多起点优化轮转频段选择
+            filt._init_index = init_seq
+            filt._init_offset = getattr(self, '_init_offset', 0)
             filter_params[ix] = filt.init(remaining_target)  # Init filter and place params to list of lists
             remaining_target -= filt.fr  # Adjust target
         filter_params = np.concatenate(filter_params).flatten()  # Flatten params list
@@ -697,8 +737,14 @@ class PEQ:
         ):
             raise OptimizationFinished('STD too small')
 
-    def optimize(self):
-        """Optimizes filter parameters"""
+    def optimize(self, multi_start=None):
+        """Optimizes filter parameters
+
+        Args:
+            multi_start: If given (int > 1), runs the optimizer from N different initial
+                starting points (band-spread init with different offsets) and keeps the
+                best result by loss. Slower but finds a better local minimum for visual fit.
+        """
         has_free_variables = False
         for filt in self.filters:
             if filt.optimize_fc or filt.optimize_q or filt.optimize_gain:
@@ -706,17 +752,43 @@ class PEQ:
                 break
         if not has_free_variables:
             return
-        self.history = OptimizationHistory()
-        try:
-            fmin_slsqp(  # Tested all of the scipy minimize methods, this is the best
-                self._optimizer_loss,
-                self._init_optimizer_params(),
-                bounds=self._init_optimizer_bounds(),
-                callback=self._callback,
-                iprint=0)
-        except OptimizationFinished as err:
-            # Restore best params
-            self._parse_optimizer_params(self.history.params[np.argmin(self.history.loss)])
+
+        n_starts = multi_start if (multi_start and multi_start > 1 and any(
+            f.optimize_fc for f in self.filters)) else 1
+
+        best_loss = None
+        best_params = None
+        for start_ix in range(n_starts):
+            # 不同起点的频段偏移：让初始化峰选择在不同频段轮转
+            self._init_offset = start_ix
+            self.history = OptimizationHistory()
+            x0 = self._init_optimizer_params()
+            bounds = self._init_optimizer_bounds()
+            try:
+                result = fmin_slsqp(  # Tested all of the scipy minimize methods, this is the best
+                    self._optimizer_loss,
+                    x0,
+                    bounds=bounds,
+                    callback=self._callback,
+                    iprint=0)
+                # 收敛时 result 即最优参数；重新 parse 后算 loss 对比
+                final_params = np.asarray(result).flatten()
+                self._parse_optimizer_params(final_params)
+                loss_final = float(self._optimizer_loss(final_params, parse=False))
+                if best_loss is None or loss_final < best_loss:
+                    best_loss = loss_final
+                    best_params = final_params.copy()
+            except OptimizationFinished as err:
+                pass
+            # 本轮 history 中若有更优记录也纳入比较（early-stop 时 history 有最终态）
+            if self.history.loss:
+                ix_best = int(np.argmin(self.history.loss))
+                if best_loss is None or self.history.loss[ix_best] < best_loss:
+                    best_loss = self.history.loss[ix_best]
+                    best_params = self.history.params[ix_best]
+        # 恢复全局最优参数
+        if best_params is not None:
+            self._parse_optimizer_params(best_params)
 
     def plot(self, fig=None, ax=None):
         if fig is None:

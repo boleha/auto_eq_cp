@@ -167,14 +167,38 @@ class FrequencyResponse:
                 max_time = max_time - (time() - start_time)
         return peqs
 
-    def optimize_parametric_eq(self, configs, fs, max_time=None, preamp=DEFAULT_PREAMP):
-        """Creates optimal set of parametric eq filters to match the equalization data"""
-        peqs = self._optimize_peq_filters(configs, fs, max_time=max_time, preamp=preamp)
-        fr = FrequencyResponse(
+    def optimize_parametric_eq(self, configs, fs, max_time=None, preamp=DEFAULT_PREAMP, multi_start=None):
+        """Creates optimal set of parametric eq filters to match the equalization data
+
+        Args:
+            multi_start: 多起点优化次数（>1 时启用），每轮从不同频段偏移的初始化出发，
+                取 loss 最小的结果。提升视觉贴合度，代价是耗时 ×multi_start。
+        """
+        if type(configs) != list:
+            configs = [configs]
+        peqs = []
+        fr = self.__class__(name='optimizer', frequency=self.frequency, equalization=self.equalization)
+        if preamp:
+            fr.equalization += preamp
+        fr.interpolate(f_step=DEFAULT_BIQUAD_OPTIMIZATION_F_STEP)
+        start_time = time()
+        for config in configs:
+            if 'optimizer' in config and max_time is not None:
+                config['optimizer']['max_time'] = max_time
+            peq = PEQ.from_dict(config, fr.frequency, fs, target=fr.equalization)
+            if multi_start and multi_start > 1:
+                peq.optimize(multi_start=multi_start)
+            else:
+                peq.optimize()
+            fr.equalization -= peq.fr
+            peqs.append(peq)
+            if max_time is not None:
+                max_time = max_time - (time() - start_time)
+        fr_out = FrequencyResponse(
             name='PEQ', frequency=self.generate_frequencies(f_step=DEFAULT_BIQUAD_OPTIMIZATION_F_STEP),
             raw=np.sum(np.vstack([peq.fr for peq in peqs]), axis=0))
-        fr.interpolate(f=self.frequency)
-        self.parametric_eq = fr.raw
+        fr_out.interpolate(f=self.frequency)
+        self.parametric_eq = fr_out.raw
         return peqs
 
     def optimize_fixed_band_eq(self, configs, fs, max_time=None, preamp=DEFAULT_PREAMP, gain_range=None):

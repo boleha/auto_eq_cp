@@ -20,6 +20,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from copy import deepcopy
+
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -636,21 +638,38 @@ async def eq_by_range(request: EqRangeRequest):
             min_mean_error=request.min_mean_error,
         )
 
-        peq_config = PEQ_CONFIGS.get(request.config, PEQ_CONFIGS['8_PEAKING_WITH_SHELVES'])
+        # 配置选择：max_filters≤5 用 5_PEAKING（5 个 fc 全自由重新优化），
+        # 避免"10 个滤波器解截断成 5 个"导致曲线不贴合。
+        effective_config = request.config
+        if request.config == '10_PEAKING' and request.max_filters is not None and request.max_filters <= 5:
+            effective_config = '5_PEAKING'
+        peq_config = PEQ_CONFIGS.get(effective_config, PEQ_CONFIGS['8_PEAKING_WITH_SHELVES'])
         # AUTO：对数均匀频点（25Hz-18kHz，n 个），保证全频段覆盖且高频贴合。
         # （峰谷自适应会把低频峰谷全占满导致高频没滤波器，对数均匀最稳）
-        if request.config == 'AUTO':
+        if effective_config == 'AUTO':
             n_filters = request.max_filters if request.max_filters is not None else 8
             n = max(2, n_filters)
             log_fcs = [25.0 * (18000.0 / 25.0) ** (i / (n - 1)) for i in range(n)]
             adaptive_config = {'filters': [{'type': 'PEAKING', 'fc': round(fc, 1)} for fc in log_fcs]}
-            # gain_range 作为优化器边界约束（±12 内），避免超限
-            if request.gain_range is not None and request.gain_range.low is not None and request.gain_range.high is not None:
-                for fc_cfg in adaptive_config['filters']:
+            peq_config = adaptive_config
+
+        # gain_range / q_range 作为优化器边界约束，避免超限。
+        # 深拷贝配置后写入每个 filter 的边界，不污染全局 PEQ_CONFIGS。
+        has_gain_range = request.gain_range is not None and request.gain_range.low is not None and request.gain_range.high is not None
+        has_q_range = request.q_range is not None and request.q_range.low is not None and request.q_range.high is not None
+        if has_gain_range or has_q_range:
+            peq_config = deepcopy(peq_config)
+            for fc_cfg in peq_config['filters']:
+                if has_gain_range:
                     fc_cfg['min_gain'] = float(request.gain_range.low)
                     fc_cfg['max_gain'] = float(request.gain_range.high)
-            peq_config = adaptive_config
-        peqs = fr.optimize_parametric_eq(peq_config, request.fs, preamp=request.preamp)
+                if has_q_range:
+                    fc_cfg['min_q'] = float(request.q_range.low)
+                    fc_cfg['max_q'] = float(request.q_range.high)
+        # 多起点优化（3 组不同频段偏移初始化，取 loss 最小），提升曲线贴合度：
+        # 5_PEAKING 与 WITH_SHELVES 系列都启用（贴合目标是"合成曲线贴合目标曲线"）
+        multi_start = 3 if effective_config in ('5_PEAKING', 'FIXED_5_WITH_SHELVES', 'FIXED_8_WITH_SHELVES', 'FIXED_10_WITH_SHELVES', '8_PEAKING_WITH_SHELVES') else None
+        peqs = fr.optimize_parametric_eq(peq_config, request.fs, preamp=request.preamp, multi_start=multi_start)
 
         low = request.eq_range.low
         high = request.eq_range.high
