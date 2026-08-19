@@ -123,13 +123,14 @@ PEQ_CONFIGS = {
             'min_std': 0.0001,
             'banded_visual': True,
         },
-        # 每个滤波器负责一个宽频段；fc 在段内自由优化，不写死具体频率
+        # 每个滤波器负责一个宽频段；fc 在段内自由优化，不写死具体频率。
+        # gain 放宽到 ±30：5 个滤波器时高频深谷段单个 peaking 可能需超过 ±20dB
         'filters': [
-            {'type': 'PEAKING', 'min_fc': 20.0, 'max_fc': 100.0},
-            {'type': 'PEAKING', 'min_fc': 100.0, 'max_fc': 500.0},
-            {'type': 'PEAKING', 'min_fc': 500.0, 'max_fc': 2000.0},
-            {'type': 'PEAKING', 'min_fc': 2000.0, 'max_fc': 10000.0},
-            {'type': 'PEAKING', 'min_fc': 10000.0, 'max_fc': 20000.0},
+            {'type': 'PEAKING', 'min_fc': 20.0, 'max_fc': 100.0, 'min_gain': -30.0, 'max_gain': 30.0},
+            {'type': 'PEAKING', 'min_fc': 100.0, 'max_fc': 500.0, 'min_gain': -30.0, 'max_gain': 30.0},
+            {'type': 'PEAKING', 'min_fc': 500.0, 'max_fc': 2000.0, 'min_gain': -30.0, 'max_gain': 30.0},
+            {'type': 'PEAKING', 'min_fc': 2000.0, 'max_fc': 10000.0, 'min_gain': -30.0, 'max_gain': 30.0},
+            {'type': 'PEAKING', 'min_fc': 10000.0, 'max_fc': 20000.0, 'min_gain': -30.0, 'max_gain': 30.0},
         ]
     },
     'FIXED_5_PEAKING': {

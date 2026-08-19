@@ -569,6 +569,10 @@ class EqRangeRequest(BaseModel):
     treble_f_lower: float = Field(default=6000.0, description="高频处理下限频率，Hz")
     treble_f_upper: float = Field(default=8000.0, description="高频处理上限频率，Hz")
     treble_gain_k: float = Field(default=1.0, description="高频增益系数，>1更激进，<1更保守")
+    test_gain: float = Field(default=0.0, description="测试曲线整体偏移，dB（center 后叠加，即 dBr 域）")
+    target_gain: float = Field(default=0.0, description="目标曲线整体偏移，dB（center 后叠加，即 dBr 域）")
+    skip_center: bool = Field(default=False, description="跳过 1kHz 归一化（前端已归一化并叠加拖动偏移时启用，避免偏移被 center 抵消）")
+    skip_threshold: float = Field(default=1.5, description="贴合段自动跳过阈值，dB（段内平均绝对误差小于该值则固定增益0，不参与优化）")
     max_gain: float = Field(default=20.0, description="最大增益限制，dB")
     max_slope: float = Field(default=18.0, description="EQ曲线最大斜率限制，dB/倍频程")
     tilt: float = Field(default=0.0, description="目标曲线倾斜度，正数=温暖，负数=明亮，dB/倍频程")
@@ -608,7 +612,13 @@ async def eq_by_range(request: EqRangeRequest):
             raw=np.array(request.select.raw)
         )
         fr.interpolate()
-        fr.center()
+        # skip_center：前端已按 1kHz 归一化并叠加拖动偏移，center 会把偏移抵消
+        if not request.skip_center:
+            fr.center()
+        # 用户拖动偏移：center（1kHz 归 0）之后叠加，作用于 dBr 域，
+        # 直接改变拟合误差（center 前叠加会被 center 抵消，等价于没加）
+        if request.test_gain != 0.0:
+            fr.raw = fr.raw + request.test_gain
 
         target = FrequencyResponse(
             name='target',
@@ -616,7 +626,10 @@ async def eq_by_range(request: EqRangeRequest):
             raw=np.array(request.target.raw)
         )
         target.interpolate()
-        target.center()
+        if not request.skip_center:
+            target.center()
+        if request.target_gain != 0.0:
+            target.raw = target.raw + request.target_gain
 
         fr.process(
             target=target,
@@ -671,7 +684,7 @@ async def eq_by_range(request: EqRangeRequest):
                 return [low * ratio ** i for i in range(amount + 1)]
 
             # 高频加密：预留约 30% 的滤波器给 treble 区域，避免所有滤波器
-            # 都集中在低中频。5/8/10 个滤波器分别约为 3+2、5+3、7+3。
+# 都集中在低中频。5/8/10 个滤波器分别约为 3+2、5+3、7+3。
             if treble_start < band_high and count >= 3:
                 high_count = min(count - 1, max(2, int(np.ceil(count * 0.3))))
                 low_count = count - high_count
@@ -684,7 +697,12 @@ async def eq_by_range(request: EqRangeRequest):
             if effective_config in peaking_configs:
                 peq_config = deepcopy(PEQ_CONFIGS['5_PEAKING'])
                 peq_config['filters'] = [
-                    {'type': 'PEAKING', 'min_fc': edges[i], 'max_fc': edges[i + 1]}
+                    {
+                        'type': 'PEAKING', 'min_fc': edges[i], 'max_fc': edges[i + 1],
+                        # 5_PEAKING 只有 5 个滤波器，高频深谷段（如 5128 delta 20kHz -33dB）
+                        # 单个 peaking 需要超过 ±20dB 才能贴合；放宽到 ±30 避免撞边界残留大残差
+                        'min_gain': -30.0, 'max_gain': 30.0,
+                    }
                     for i in range(count)
                 ]
             elif count >= 3:
@@ -712,6 +730,7 @@ async def eq_by_range(request: EqRangeRequest):
 
         # gain_range / q_range 作为优化器边界约束，避免超限。
         # 深拷贝配置后写入每个 filter 的边界，不污染全局 PEQ_CONFIGS。
+        # （放在 skip 重分配之后，保证重分配生成的滤波器同样受边界约束）
         has_gain_range = request.gain_range is not None and request.gain_range.low is not None and request.gain_range.high is not None
         has_q_range = request.q_range is not None and request.q_range.low is not None and request.q_range.high is not None
         if has_gain_range or has_q_range:
@@ -723,12 +742,102 @@ async def eq_by_range(request: EqRangeRequest):
                 if has_q_range:
                     fc_cfg['min_q'] = float(request.q_range.low)
                     fc_cfg['max_q'] = float(request.q_range.high)
+
+        # 贴合段自动跳过：拖动偏移后，按逐点误差自动找"连续贴合区域"（|误差|<skip_threshold 的连续频段），
+        # 整个贴合区域不优化、不占滤波器名额；未贴合区域按对数宽度分配全部滤波器名额（段内细分）。
+        # 不受固定分段边界限制——用户拖动对齐的低频/高频/中频任意形状都能被整体识别为贴合区跳过。
+        # shelf 配置保持 Low/HighShelf 结构，被跳过的段直接固定 gain=0。
+        if request.skip_threshold > 0 and effective_config in dynamic_configs and peq_config.get('filters'):
+            fr_f = fr.frequency
+            # 兜底：band_low/band_high 在 max_filters 为 None（未走动态分段）时未定义，这里用 eq_range 补上
+            if 'band_low' not in locals() or 'band_high' not in locals():
+                band_low = max(20.0, float(request.eq_range.low))
+                band_high = min(20000.0, float(request.eq_range.high))
+            tgt_err = np.interp(fr_f, target.frequency, target.raw) - fr.raw
+            fit_mask = np.abs(tgt_err) < request.skip_threshold
+
+            # 连续贴合区间识别（对数网格上取连续真值段，跨度≥0.25 十进位才算贴合区，避免单点毛刺）
+            in_band = (fr_f >= band_low) & (fr_f <= band_high)
+            active = fit_mask & in_band
+            fitted_ranges = []
+            start = None
+            prev = None
+            for i, f in enumerate(fr_f):
+                if not in_band[i]:
+                    if start is not None and np.log10(prev) - np.log10(start) >= 0.25:
+                        fitted_ranges.append((start, prev))
+                        start = None
+                    continue
+                if active[i]:
+                    if start is None:
+                        start = f
+                    prev = f
+                else:
+                    if start is not None and np.log10(prev) - np.log10(start) >= 0.25:
+                        fitted_ranges.append((start, prev))
+                    start = None
+            if start is not None and np.log10(prev) - np.log10(start) >= 0.25:
+                fitted_ranges.append((start, prev))
+
+            if fitted_ranges and effective_config in peaking_configs and len(peq_config['filters']) >= 2:
+                total_filters = len(peq_config['filters'])
+                # 未贴合区间：band 范围减去贴合区间
+                free_ranges = []
+                cursor = band_low
+                for lo, hi in fitted_ranges:
+                    if lo > cursor:
+                        free_ranges.append((cursor, lo))
+                    cursor = max(cursor, hi)
+                if cursor < band_high:
+                    free_ranges.append((cursor, band_high))
+                free_ranges = [(lo, hi) for lo, hi in free_ranges
+                               if hi - lo > 1e-3 and np.log10(hi) - np.log10(lo) >= 0.1]
+
+                if free_ranges:
+                    widths = [np.log(hi / lo) for lo, hi in free_ranges]
+                    total_w = float(np.sum(widths))
+                    alloc = [max(1, int(round(total_filters * w / total_w))) for w in widths]
+                    while sum(alloc) < total_filters:
+                        alloc[int(np.argmax([w / a for w, a in zip(widths, alloc)]))] += 1
+                    while sum(alloc) > total_filters:
+                        cand = [i for i, a in enumerate(alloc) if a > 1]
+                        if not cand:
+                            break
+                        i = min(cand, key=lambda i: widths[i] / alloc[i])
+                        alloc[i] -= 1
+                    new_filters = []
+                    for (lo, hi), n in zip(free_ranges, alloc):
+                        sub = log_edges(lo, hi, n)
+                        for j in range(n):
+                            new_filters.append({
+                                'type': 'PEAKING', 'min_fc': sub[j], 'max_fc': sub[j + 1],
+                                'min_gain': -30.0, 'max_gain': 30.0,
+                            })
+                    peq_config = deepcopy(peq_config)
+                    peq_config['filters'] = new_filters
+                else:
+                    # 全部贴合：无滤波器
+                    peq_config = deepcopy(peq_config)
+                    peq_config['filters'] = []
+            else:
+                # 无贴合区或 shelf 配置：原分段逻辑，把落在贴合区的段固定 gain=0
+                for fc_cfg in peq_config['filters']:
+                    if 'min_fc' not in fc_cfg or 'max_fc' not in fc_cfg:
+                        continue
+                    m = (fr_f >= fc_cfg['min_fc']) & (fr_f <= fc_cfg['max_fc'])
+                    if np.any(m):
+                        mean_err = float(np.mean(tgt_err[m]))
+                        mae = float(np.mean(np.abs(tgt_err[m])))
+                        if abs(mean_err) < request.skip_threshold and mae < request.skip_threshold * 3:
+                            fc_cfg['gain'] = 0.0
         # 多起点优化，提升曲线贴合度：
-        # 5/8_PEAKING 单组已足够（频段已隔离）；10_PEAKING 用 2 组平衡速度；
-        # shelf 系列用 3 组。
+# 多起点优化，提升曲线贴合度：
+        # 后端已把源文件稀释到 2500 桶（约 5000 点）。
+        # 多起点：5_PEAKING 提到 3，多起点轮转频段避免单起点陷入局部最优，
+        # 换取更贴合（代价是耗时约 ×3）；若实测无提升可回落 1。
         # 目标是合成曲线贴合测试目标，不是听感调音。
         if effective_config == '5_PEAKING':
-            multi_start = 1
+            multi_start = 3
         elif effective_config == '8_PEAKING':
             multi_start = 1
         elif effective_config == '10_PEAKING':
